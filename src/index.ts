@@ -2,6 +2,14 @@ import { Client, GatewayIntentBits, REST, Routes } from 'discord.js';
 import { config } from './config';
 import { commands, handleCommand } from './commands/CommandHandler';
 
+// Suppress TimeoutNegativeWarning from discord.js voice (harmless streaming latency)
+process.on('warning', (warning) => {
+  if (warning.name === 'TimeoutNegativeWarning') {
+    return; // Ignore this specific warning
+  }
+  console.warn(warning);
+});
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,

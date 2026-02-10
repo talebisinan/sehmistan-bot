@@ -6,10 +6,13 @@ import {
   VoiceConnection,
   AudioPlayer,
   NoSubscriberBehavior,
+  StreamType,
+  VoiceConnectionStatus,
+  entersState,
 } from '@discordjs/voice';
 import type { VoiceBasedChannel } from 'discord.js';
-import { spawn } from 'child_process';
 import { search } from 'play-dl';
+import { spawn } from 'child_process';
 
 interface QueueItem {
   url: string;
@@ -33,6 +36,15 @@ export class MusicService {
         guildId: channel.guild.id,
         adapterCreator: channel.guild.voiceAdapterCreator,
       });
+
+      try {
+        await entersState(this.connection, VoiceConnectionStatus.Ready, 30_000);
+        console.log('✅ Voice connection ready');
+      } catch (error) {
+        console.error('❌ Failed to establish voice connection');
+        this.connection.destroy();
+        throw error;
+      }
       
       this.player = createAudioPlayer({
         behaviors: {
@@ -45,6 +57,10 @@ export class MusicService {
       this.player.on(AudioPlayerStatus.Idle, () => {
         this.isPlaying = false;
         this.playNext();
+      });
+
+      this.player.on(AudioPlayerStatus.Playing, () => {
+        console.log('🎶 Audio started playing');
       });
       
       this.player.on('error', (error) => {
@@ -72,30 +88,87 @@ export class MusicService {
     try {
       console.log(`🎵 Loading: ${item.title}`);
       
-      // Use yt-dlp to stream audio
-      const stream = spawn('yt-dlp', [
-        '-f', 'bestaudio',
+      // Use yt-dlp with flexible format selection
+      const ytdlp = spawn('yt-dlp', [
+        '-f', 'bestaudio/best',
         '-o', '-',
         '--no-playlist',
-        '--no-warnings',
-        '--extract-audio',
-        '--audio-format', 'opus',
+        '--extractor-args', 'youtube:player_client=android',
         item.url,
       ], {
-        stdio: ['ignore', 'pipe', 'ignore'],
+        stdio: ['ignore', 'pipe', 'pipe'],
       });
 
-      const resource = createAudioResource(stream.stdout);
+      // Simple ffmpeg transcoding
+      const ffmpeg = spawn('ffmpeg', [
+        '-i', 'pipe:0',
+        '-fflags', '+nobuffer',
+        '-flags', 'low_delay',
+        '-f', 's16le',
+        '-ar', '48000',
+        '-ac', '2',
+        '-loglevel', 'error',
+        'pipe:1',
+      ], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+
+      ytdlp.stderr.on('data', (data) => {
+        const msg = data.toString();
+        if (msg.includes('ERROR')) {
+          console.error('❌ yt-dlp error:', msg);
+        }
+      });
+
+      ffmpeg.stderr.on('data', (data) => {
+        const msg = data.toString();
+        // Ignore cleanup errors that don't affect playback
+        if (msg.includes('Error writing trailer') || 
+            msg.includes('Error closing file') ||
+            msg.includes('Error muxing a packet') ||
+            msg.includes('Error submitting a packet')) {
+          return;
+        }
+        if (msg.includes('Error') || msg.includes('error')) {
+          console.error('❌ ffmpeg error:', msg);
+        }
+      });
+
+      ytdlp.on('error', (error) => {
+        console.error('❌ yt-dlp process error:', error);
+        this.playNext();
+      });
+
+      ffmpeg.on('error', (error) => {
+        console.error('❌ ffmpeg process error:', error);
+        this.playNext();
+      });
+
+      ffmpeg.stdin.on('error', (error) => {
+        // Ignore EPIPE errors - they're normal when the stream ends
+        if (error.code !== 'EPIPE') {
+          console.error('❌ ffmpeg stdin error:', error);
+        }
+      });
+
+      ytdlp.stdout.on('error', (error) => {
+        // Ignore EPIPE errors
+        if (error.code !== 'EPIPE') {
+          console.error('❌ yt-dlp stdout error:', error);
+        }
+      });
+
+      ytdlp.stdout.pipe(ffmpeg.stdin);
+      
+      const resource = createAudioResource(ffmpeg.stdout, {
+        inputType: StreamType.Raw,
+      });
 
       this.player!.play(resource);
       this.isPlaying = true;
       
       console.log(`▶️  Now playing: ${item.title}`);
-      
-      stream.on('error', (error) => {
-        console.error('❌ yt-dlp error:', error);
-        this.playNext();
-      });
+      console.log(`🔊 Player state: ${this.player!.state.status}`);
       
     } catch (error) {
       console.error('❌ Playback error:', error);
@@ -113,9 +186,7 @@ export class MusicService {
     // Check if it's already a URL
     if (searchOrUrl.includes('youtube.com') || searchOrUrl.includes('youtu.be')) {
       console.log('🔗 YouTube URL detected');
-      // Get title using yt-dlp
-      const title = await this.getVideoTitle(searchOrUrl);
-      return { url: searchOrUrl, title };
+      return { url: searchOrUrl, title: 'YouTube Video' };
     }
 
     // Search for the video
@@ -129,45 +200,20 @@ export class MusicService {
       throw new Error('No results found');
     }
 
-    const [video] = searchResults || [];
-    if(video) {
-      console.log(`✅ Found: ${video.title}`);
-      
-      return {
-        url: video.url,
-        title: video.title || 'Unknown',
-      };
+    const video = searchResults[0];
+    if (!video || !video.url) {
+      throw new Error('Invalid video result');
     }
 
-    console.error('❌ Invalid video result');
-    this.skip();
-    return { url: '', title: 'Unknown' };
-
-
+    console.log(`✅ Found: ${video.title}`);
+    
+    return {
+      url: video.url,
+      title: video.title || 'Unknown',
+    };
   }
 
-  private async getVideoTitle(url: string): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const process = spawn('yt-dlp', ['--get-title', '--no-warnings', url]);
-      let title = '';
-      
-      process.stdout.on('data', (data) => {
-        title += data.toString();
-      });
-      
-      process.on('close', (code) => {
-        if (code === 0) {
-          resolve(title.trim() || 'Unknown');
-        } else {
-          resolve('Unknown');
-        }
-      });
-      
-      process.on('error', () => {
-        resolve('Unknown');
-      });
-    });
-  }
+
 
   disconnect() {
     this.queue = [];
