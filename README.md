@@ -2,19 +2,35 @@
 
 ![sehmistan bot](https://static1.personalitydatabase.net/2/pdb-images-prod/4c3713a1/profile_images/e94bf6963f1147de94294d202269ca2f.png)
 
-Install system dependencies:
+## Installation
+
+### Install Bun Runtime
 
 ```bash
 curl -fsSL https://bun.sh/install | bash
-sudo apt install -y ffmpeg libopus0 libopus-dev
-sudo apt install -y yt-dlp
 ```
 
-Install project dependencies
+### Install System Dependencies
+
+#### Debian/Ubuntu (apt)
+
+```bash
+sudo apt install -y ffmpeg libopus0 libopus-dev yt-dlp
+```
+
+#### Fedora/RHEL/CentOS (dnf)
+
+```bash
+sudo dnf install -y ffmpeg opus opus-devel yt-dlp
+```
+
+### Install Project Dependencies
 
 ```bash
 bun install
 ```
+
+## Usage
 
 To run:
 
