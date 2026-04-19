@@ -29,8 +29,8 @@ export const commands = [
     .setName("s")
     .setDescription("Skip the current song"),
   new SlashCommandBuilder()
-    .setName("hi")
-    .setDescription("agzina bokumu koyucam ha"),
+    .setName("kufur")
+    .setDescription("Rastgele bir Türkçe küfür söyler"),
   new SlashCommandBuilder()
     .setName("q")
     .setDescription("Show the current music queue"),
@@ -112,19 +112,15 @@ export async function handleCommand(
         break;
       }
 
-      case "hi": {
-        const voiceChannel = member.voice.channel;
-        if (!voiceChannel) {
-          await interaction.reply({
-            content: "❌ You need to be in a voice channel!",
-            ephemeral: true,
-          });
-          return;
-        }
-
-        await interaction.reply("agzina bokumu koyucam ha 😎");
-        const url = "https://youtu.be/P2vukW4dexQ?t=17";
-        await service.play(voiceChannel, url, member.user.username);
+      case "kufur": {
+        const swears: string[] = JSON.parse(
+          Buffer.from(
+            "WyJzaWt0aXIiLCAiYW1rIiwgIsWfYWtsYWJhbi4iLCAiw6dlbnRpa+KAmWluIGhhc8SxIGtpbXlvbmxhLCBwxLF0dMSxxJ/EsW4gaGFzxLEgbWlueW9uZGEgb2x1ci4iLCAic2VuaSBtw7xqZGVsZXllbiBsZXlsZWtsZXJpbiB5b2wgaGFyaXRhc8SxbsSxIHNpa2V5aW0iLCAib2MiLCAia2FocGUiLCAiZ290dmVyZW4iLCAieWFycmFrIGthZmFsaSIsICJzZW5pIHRvcm5hIHRlemdhaGluZGEgc2lrZXJpbSIsICJpdCBvZ2x1IGl0IiwgImFsbGFoIGNhbsSxbcSxIGFsc2EgZGEgw7ZsbcO8xZ9sZXJpbmkgc2lrc2VtLiIsICJrw7xydGFqZGFuIHNhxJ8gw6fEsWttxLHFnyBvcm9zcHUgw6dvY3XEn3UiLCAiZXNlayBoZXJpZiJd",
+            "base64",
+          ).toString("utf-8"),
+        );
+        const word = swears[Math.floor(Math.random() * swears.length)];
+        await interaction.reply(word);
         break;
       }
 
