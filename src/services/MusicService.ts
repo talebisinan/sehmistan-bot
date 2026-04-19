@@ -11,17 +11,28 @@ import {
   entersState,
 } from "@discordjs/voice";
 import type { VoiceBasedChannel } from "discord.js";
-import { search, video_info } from "play-dl";
-import { spawn } from "child_process";
+import { search, video_info, playlist_info } from "play-dl";
+import { spawn, ChildProcess } from "child_process";
 
 export interface QueueItem {
   url: string;
   title: string;
   requestedBy: string;
   duration?: string;
+  durationSec?: number;
 }
 
-function formatDuration(seconds: number): string {
+export interface SearchResult {
+  url: string;
+  title: string;
+  duration?: string;
+  durationSec: number;
+  channelName?: string;
+}
+
+const IDLE_TIMEOUT_MS = 3 * 60 * 1000;
+
+export function formatDuration(seconds: number): string {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   const s = Math.floor(seconds % 60);
@@ -37,68 +48,181 @@ export class MusicService {
   private player: AudioPlayer | null = null;
   private isPlaying = false;
   private currentSong: QueueItem | null = null;
+  private idleTimer: NodeJS.Timeout | null = null;
+  private pendingSeek: number | null = null;
+  private ytdlpProcess: ChildProcess | null = null;
+  private ffmpegProcess: ChildProcess | null = null;
 
   async play(
     channel: VoiceBasedChannel,
-    searchOrUrl: string,
+    urlOrQuery: string,
     requestedBy: string = "Unknown",
-  ): Promise<{ title: string; duration?: string }> {
-    const { url, title, duration } = await this.resolveTrack(searchOrUrl);
+  ): Promise<{ title: string; duration?: string; queued: number }> {
+    if (this.isPlaylistUrl(urlOrQuery)) {
+      return this.playPlaylist(channel, urlOrQuery, requestedBy);
+    }
 
-    this.queue.push({ url, title, duration, requestedBy });
+    const { url, title, duration, durationSec } = await this.resolveTrack(urlOrQuery);
+    this.queue.push({ url, title, duration, durationSec, requestedBy });
 
     if (!this.connection) {
-      this.connection = joinVoiceChannel({
-        channelId: channel.id,
-        guildId: channel.guild.id,
-        adapterCreator: channel.guild.voiceAdapterCreator,
-      });
-
-      try {
-        await entersState(this.connection, VoiceConnectionStatus.Ready, 30_000);
-        console.log("✅ Voice connection ready");
-      } catch (error) {
-        console.error("❌ Failed to establish voice connection");
-        this.connection.destroy();
-        throw error;
-      }
-
-      this.player = createAudioPlayer({
-        behaviors: {
-          noSubscriber: NoSubscriberBehavior.Play,
-        },
-      });
-
-      this.connection.subscribe(this.player);
-
-      this.player.on(AudioPlayerStatus.Idle, () => {
-        this.isPlaying = false;
-        this.playNext();
-      });
-
-      this.player.on(AudioPlayerStatus.Playing, () => {
-        console.log("🎶 Audio started playing");
-      });
-
-      this.player.on("error", (error) => {
-        console.error("❌ Player error:", error);
-        this.isPlaying = false;
-        this.currentSong = null;
-        this.playNext();
-      });
+      await this.initConnection(channel);
     }
 
     if (!this.isPlaying) {
       this.playNext();
     }
 
-    return { title, duration };
+    return { title, duration, queued: 1 };
   }
 
-  private async playNext(): Promise<void> {
+  private isPlaylistUrl(url: string): boolean {
+    try {
+      const parsed = new URL(url);
+      return (
+        parsed.hostname.includes("youtube.com") &&
+        parsed.pathname === "/playlist" &&
+        !!parsed.searchParams.get("list")
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  private async playPlaylist(
+    channel: VoiceBasedChannel,
+    url: string,
+    requestedBy: string,
+  ): Promise<{ title: string; duration?: string; queued: number }> {
+    const playlist = await playlist_info(url, { incomplete: true });
+    const allVideos = await playlist.all_videos();
+    const videos = allVideos.slice(0, 100);
+
+    if (videos.length === 0) throw new Error("Playlist is empty or unavailable");
+
+    for (const v of videos) {
+      if (!v.url || !v.title) continue;
+      this.queue.push({
+        url: v.url,
+        title: v.title,
+        requestedBy,
+        duration: v.durationInSec > 0 ? formatDuration(v.durationInSec) : undefined,
+        durationSec: v.durationInSec,
+      });
+    }
+
+    if (!this.connection) {
+      await this.initConnection(channel);
+    }
+
+    if (!this.isPlaying) {
+      this.playNext();
+    }
+
+    const first = videos[0]!;
+    return {
+      title: first.title ?? "Unknown",
+      duration: first.durationInSec > 0 ? formatDuration(first.durationInSec) : undefined,
+      queued: videos.length,
+    };
+  }
+
+  async searchTracks(query: string): Promise<SearchResult[]> {
+    const results = await search(query, { limit: 5, source: { youtube: "video" } });
+    return results
+      .filter((v) => v.url && v.title)
+      .map((v) => ({
+        url: v.url,
+        title: v.title ?? "Unknown",
+        duration: v.durationInSec > 0 ? formatDuration(v.durationInSec) : undefined,
+        durationSec: v.durationInSec,
+        channelName: v.channel?.name,
+      }));
+  }
+
+  seek(seconds: number): boolean {
+    if (!this.currentSong || !this.player) return false;
+    this.pendingSeek = seconds;
+    this.queue.unshift(this.currentSong);
+    this.player.stop();
+    return true;
+  }
+
+  private async initConnection(channel: VoiceBasedChannel): Promise<void> {
+    this.connection = joinVoiceChannel({
+      channelId: channel.id,
+      guildId: channel.guild.id,
+      adapterCreator: channel.guild.voiceAdapterCreator,
+    });
+
+    try {
+      await entersState(this.connection, VoiceConnectionStatus.Ready, 30_000);
+      console.log("✅ Voice connection ready");
+    } catch (error) {
+      console.error("❌ Failed to establish voice connection");
+      this.connection.destroy();
+      this.connection = null;
+      throw error;
+    }
+
+    this.player = createAudioPlayer({
+      behaviors: { noSubscriber: NoSubscriberBehavior.Play },
+    });
+
+    this.connection.subscribe(this.player);
+
+    this.player.on(AudioPlayerStatus.Idle, () => {
+      this.isPlaying = false;
+      const seekSec = this.pendingSeek ?? 0;
+      this.pendingSeek = null;
+      this.playNext(seekSec);
+    });
+
+    this.player.on(AudioPlayerStatus.Playing, () => {
+      console.log("🎶 Audio started playing");
+    });
+
+    this.player.on("error", (error) => {
+      console.error("❌ Player error:", error);
+      this.isPlaying = false;
+      this.currentSong = null;
+      this.pendingSeek = null;
+      this.playNext();
+    });
+  }
+
+  private killCurrentProcesses(): void {
+    if (this.ytdlpProcess) {
+      this.ytdlpProcess.kill("SIGKILL");
+      this.ytdlpProcess = null;
+    }
+    if (this.ffmpegProcess) {
+      this.ffmpegProcess.kill("SIGKILL");
+      this.ffmpegProcess = null;
+    }
+  }
+
+  private startIdleTimer(): void {
+    this.idleTimer = setTimeout(() => {
+      console.log("💤 Idle timeout — disconnecting");
+      this.disconnect();
+    }, IDLE_TIMEOUT_MS);
+  }
+
+  private cancelIdleTimer(): void {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+  }
+
+  private async playNext(seekSeconds = 0): Promise<void> {
+    this.cancelIdleTimer();
+
     if (this.queue.length === 0) {
       this.isPlaying = false;
       this.currentSong = null;
+      this.startIdleTimer();
       return;
     }
 
@@ -106,6 +230,8 @@ export class MusicService {
 
     try {
       console.log(`🎵 Loading: ${item.title}`);
+
+      this.killCurrentProcesses();
 
       const ytdlpArgs: string[] = [
         "-f",
@@ -127,30 +253,34 @@ export class MusicService {
       const ytdlp = spawn("yt-dlp", ytdlpArgs, {
         stdio: ["ignore", "pipe", "pipe"],
       });
+      this.ytdlpProcess = ytdlp;
 
-      const ffmpeg = spawn(
-        "ffmpeg",
-        [
-          "-i",
-          "pipe:0",
-          "-fflags",
-          "+nobuffer",
-          "-flags",
-          "low_delay",
-          "-f",
-          "s16le",
-          "-ar",
-          "48000",
-          "-ac",
-          "2",
-          "-loglevel",
-          "error",
-          "pipe:1",
-        ],
-        {
-          stdio: ["pipe", "pipe", "pipe"],
-        },
+      const ffmpegArgs: string[] = ["-i", "pipe:0"];
+
+      if (seekSeconds > 0) {
+        ffmpegArgs.push("-ss", String(seekSeconds));
+      }
+
+      ffmpegArgs.push(
+        "-fflags",
+        "+nobuffer",
+        "-flags",
+        "low_delay",
+        "-f",
+        "s16le",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+        "-loglevel",
+        "error",
+        "pipe:1",
       );
+
+      const ffmpeg = spawn("ffmpeg", ffmpegArgs, {
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      this.ffmpegProcess = ffmpeg;
 
       ytdlp.stderr!.on("data", (data: Buffer) => {
         const msg = data.toString();
@@ -225,7 +355,7 @@ export class MusicService {
 
   private async resolveTrack(
     searchOrUrl: string,
-  ): Promise<{ url: string; title: string; duration?: string }> {
+  ): Promise<{ url: string; title: string; duration?: string; durationSec?: number }> {
     if (
       searchOrUrl.includes("youtube.com") ||
       searchOrUrl.includes("youtu.be")
@@ -234,11 +364,10 @@ export class MusicService {
       try {
         const info = await video_info(searchOrUrl);
         const title = info.video_details.title ?? "YouTube Video";
-        const durationInSec = info.video_details.durationInSec;
-        const duration =
-          durationInSec > 0 ? formatDuration(durationInSec) : undefined;
+        const durationSec = info.video_details.durationInSec;
+        const duration = durationSec > 0 ? formatDuration(durationSec) : undefined;
         console.log(`✅ Found: ${title}`);
-        return { url: searchOrUrl, title, duration };
+        return { url: searchOrUrl, title, duration, durationSec };
       } catch (error) {
         console.error("⚠️ Failed to fetch video info:", error);
         return { url: searchOrUrl, title: "YouTube Video" };
@@ -261,13 +390,14 @@ export class MusicService {
     }
 
     console.log(`✅ Found: ${video.title}`);
-    const duration =
-      video.durationInSec > 0 ? formatDuration(video.durationInSec) : undefined;
+    const durationSec = video.durationInSec;
+    const duration = durationSec > 0 ? formatDuration(durationSec) : undefined;
 
     return {
       url: video.url,
       title: video.title ?? "Unknown",
       duration,
+      durationSec,
     };
   }
 
@@ -280,9 +410,12 @@ export class MusicService {
   }
 
   disconnect() {
+    this.cancelIdleTimer();
+    this.killCurrentProcesses();
     this.queue = [];
     this.isPlaying = false;
     this.currentSong = null;
+    this.pendingSeek = null;
     if (this.connection) {
       this.connection.destroy();
       this.connection = null;

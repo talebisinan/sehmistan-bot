@@ -6,11 +6,15 @@
 
 | Command | Description | Requires voice channel? |
 |---|---|---|
-| `/p <query>` | Play a song by name or YouTube URL. Shows **Now Playing** when it starts immediately, or **Added to Queue** with its position if something is already playing. | ✅ |
+| `/p <query>` | Play a song by name or YouTube URL. Plays the first search result immediately. Pass a playlist URL (`youtube.com/playlist?list=...`) to queue up to 100 tracks at once. Shows **Now Playing** when it starts immediately, or **Added to Queue** with its position if something is already playing. | ✅ |
+| `/pl <query>` | Search YouTube and pick from a list of 5 results using a dropdown menu. | ✅ |
 | `/s` | Skip the currently playing song. | ✅ |
+| `/seek <position>` | Seek to a position in the current song. Accepts `mm:ss` (e.g. `1:30`) or seconds (e.g. `90`). | ✅ |
 | `/q` | Show the full music queue — currently playing song at the top, then up to 10 upcoming songs with durations and who queued them. | ❌ |
 | `/np` | Show the currently playing song as a clickable link with its duration and requester. | ❌ |
 | `/kufur` | Reply with a random Turkish swear word. | ❌ |
+
+The bot automatically disconnects from the voice channel after 3 minutes of inactivity.
 
 ## Installation
 

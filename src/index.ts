@@ -1,6 +1,6 @@
 import { Client, GatewayIntentBits, REST, Routes } from "discord.js";
 import { config } from "./config";
-import { commands, handleCommand } from "./commands/CommandHandler";
+import { commands, handleCommand, handleSelectMenu } from "./commands/CommandHandler";
 
 process.on("warning", (warning) => {
   if (warning.name === "TimeoutNegativeWarning") return;
@@ -20,8 +20,11 @@ client.once("clientReady", () => {
 });
 
 client.on("interactionCreate", async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-  await handleCommand(interaction);
+  if (interaction.isChatInputCommand()) {
+    await handleCommand(interaction);
+  } else if (interaction.isStringSelectMenu()) {
+    await handleSelectMenu(interaction);
+  }
 });
 
 async function registerCommands() {
