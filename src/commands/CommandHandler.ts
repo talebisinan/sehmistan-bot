@@ -89,6 +89,16 @@ export const commands = [
   new SlashCommandBuilder()
     .setName("q")
     .setDescription("Show the current music queue"),
+  new SlashCommandBuilder()
+    .setName("clean")
+    .setDescription("Delete recent messages in this channel")
+    .addIntegerOption((option) =>
+      option
+        .setName("amount")
+        .setDescription("Number of messages to delete (1–100, default 10)")
+        .setMinValue(1)
+        .setMaxValue(100),
+    ),
 ];
 
 export async function handleCommand(
@@ -227,12 +237,15 @@ export async function handleCommand(
       case "kufur": {
         const swears: string[] = JSON.parse(
           Buffer.from(
-            "WyJzaWt0aXIiLCAiYW1rIiwgIsWfYWtsYWJhbi4iLCAiw6dlbnRpa+KAmWluIGhhc8SxIGtpbXlvbmxhLCBwxLF0dMSxxJ/EsW4gaGFzxLEgbWlueW9uZGUgb2x1ci4iLCAic2VuaSBtw7xqZGVsZXllbiBsZXlsZWtsZXJpbiB5b2wgaGFyaXRhc8SxbsSxIHNpa2V5aW0iLCAib2MiLCAia2FocGUiLCAiZ290dmVyZW4iLCAieWFycmFrIGthZmFsaSIsICJzZW5pIHRvcm5hIHRlemdhaGluZGEgc2lrZXJpbSIsICJpdCBvZ2x1IGl0IiwgImFsbGFoIGNhbsSxbcSxIGFsc2EgZGEgw7ZsbcO8xZ9sZXJpbmkgc2lrc2VtLiIsICJrw7xydGFqZGFuIHNhxJ8gw6fEsWttxLHFnyBvcm9zcHUgw6dvY3XEn3UiLCAiZXNlayBoZXJpZiJd",
+            "WyJzaWt0aXIiLCJhbWsiLCLFn2FrbGFiYW4uIiwiw6dlbnRpaydpbiBoYXPEsSBraW15b25sYSwgcMSxdHTEscSfxLFuIGhhc8SxIG1pbnlvbmRlIG9sdXIuIiwic2VuaSBtw7xqZGVsZXllbiBsZXlsZWtsZXJpbiB5b2wgaGFyaXRhc8SxbsSxIHNpa2V5aW0iLCJvw6ciLCJrYWhwZSIsImfDtnR2ZXJlbiIsInlhcnJhayBrYWZhbMSxIiwic2VuaSB0b3JuYSB0ZXpnYWhpbmRhIHNpa2VyaW0iLCJpdCBvxJ9sdSBpdCIsImFsbGFoIGNhbsSxbcSxIGFsc2EgZGEgw7ZsbcO8xZ9sZXJpbmkgc2lrc2VtLiIsImvDvHJ0YWpkYW4gc2HEnyDDp8Sxa23EscWfIG9yb3NwdSDDp29jdcSfdSIsImXFn2VrIGhlcmlmIiwib2UiLCJvw6ciLCJhbmFuxLEga8SxeW1hIG1ha2luZXNpbmUgYXRhciwgeWFyxLFzxLFuxLEga8SxeWFyLCB5YXLEsXPEsW7EsSBzaWtpcCBhdGFyxLFtLiIsIkFsaWsgT8OHIiwiQmlyIGRhaGEgeWF6ZMSxxJ/EsW7EsSBnw7ZyZW0sIGJhY8SxbsSxIHNpa2VtIiwiZGFsbGFtYSIsImXFn8Wfb8SfdWx1ZcWfxZ9layIsIllhcnJhayIsIlRhxZ/Fn2FrIiwiT3Jvc3B1bnVuIGbEsXJsYXR0xLHEn8SxIiwiWcSxcnTEsWsgYW3EsW4gZmVyeWFkxLEiXQ==",
             "base64",
           ).toString("utf-8"),
         );
         const word = swears[Math.floor(Math.random() * swears.length)] ?? "...";
-        await interaction.reply(word);
+        await interaction.reply({ content: word, flags: MessageFlags.Ephemeral });
+        if (interaction.channel?.isTextBased() && !interaction.channel.isThread() && "send" in interaction.channel) {
+          await interaction.channel.send({ content: word, tts: true });
+        }
         break;
       }
 
@@ -277,6 +290,51 @@ export async function handleCommand(
         }
 
         await interaction.reply({ embeds: [embed] });
+        break;
+      }
+
+      case "clean": {
+        const amount = interaction.options.getInteger("amount") ?? 10;
+
+        if (!interaction.channel || !("bulkDelete" in interaction.channel)) {
+          await interaction.reply({ content: "❌ Cannot delete messages in this channel.", flags: MessageFlags.Ephemeral });
+          return;
+        }
+
+        const botMember = interaction.guild?.members.me;
+        if (!botMember?.permissionsIn(interaction.channel).has("ManageMessages")) {
+          await interaction.reply({ content: "❌ I need the **Manage Messages** permission in this channel.", flags: MessageFlags.Ephemeral });
+          return;
+        }
+
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+        try {
+          const channel = interaction.channel;
+          const messages = await channel.messages.fetch({ limit: amount });
+          const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
+          const recent = messages.filter((m) => m.createdTimestamp > cutoff);
+          const old = messages.filter((m) => m.createdTimestamp <= cutoff);
+
+          let deletedCount = 0;
+
+          // bulkDelete requires ≥2 messages; fall back to individual delete for 1
+          if (recent.size >= 2) {
+            const bulk = await channel.bulkDelete(recent);
+            deletedCount += bulk.size;
+          } else if (recent.size === 1) {
+            try { await recent.first()!.delete(); deletedCount++; } catch (e: any) { if (e.code !== 10008) throw e; }
+          }
+
+          for (const msg of old.values()) {
+            try { await msg.delete(); deletedCount++; } catch (e: any) { if (e.code !== 10008) throw e; }
+          }
+
+          await interaction.editReply({ content: `🧹 Deleted ${deletedCount} message(s).` });
+          setTimeout(() => interaction.deleteReply().catch(() => {}), 3000);
+        } catch (error) {
+          await interaction.editReply({ content: `❌ Error: ${error instanceof Error ? error.message : "Unknown error"}` });
+        }
         break;
       }
 
