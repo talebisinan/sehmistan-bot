@@ -11,12 +11,24 @@ import {
   entersState,
 } from "@discordjs/voice";
 import type { VoiceBasedChannel } from "discord.js";
-import { search } from "play-dl";
+import { search, video_info } from "play-dl";
 import { spawn } from "child_process";
 
-interface QueueItem {
+export interface QueueItem {
   url: string;
   title: string;
+  requestedBy: string;
+  duration?: string;
+}
+
+function formatDuration(seconds: number): string {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  if (h > 0) {
+    return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  }
+  return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 export class MusicService {
@@ -24,11 +36,16 @@ export class MusicService {
   private connection: VoiceConnection | null = null;
   private player: AudioPlayer | null = null;
   private isPlaying = false;
+  private currentSong: QueueItem | null = null;
 
-  async play(channel: VoiceBasedChannel, searchOrUrl: string) {
-    const { url, title } = await this.resolveTrack(searchOrUrl);
+  async play(
+    channel: VoiceBasedChannel,
+    searchOrUrl: string,
+    requestedBy: string = "Unknown",
+  ): Promise<{ title: string; duration?: string }> {
+    const { url, title, duration } = await this.resolveTrack(searchOrUrl);
 
-    this.queue.push({ url, title });
+    this.queue.push({ url, title, duration, requestedBy });
 
     if (!this.connection) {
       this.connection = joinVoiceChannel({
@@ -66,6 +83,7 @@ export class MusicService {
       this.player.on("error", (error) => {
         console.error("❌ Player error:", error);
         this.isPlaying = false;
+        this.currentSong = null;
         this.playNext();
       });
     }
@@ -74,12 +92,13 @@ export class MusicService {
       this.playNext();
     }
 
-    return title;
+    return { title, duration };
   }
 
-  private async playNext() {
+  private async playNext(): Promise<void> {
     if (this.queue.length === 0) {
       this.isPlaying = false;
+      this.currentSong = null;
       return;
     }
 
@@ -88,25 +107,27 @@ export class MusicService {
     try {
       console.log(`🎵 Loading: ${item.title}`);
 
-      // Use yt-dlp with flexible format selection
-      const ytdlp = spawn(
-        "yt-dlp",
-        [
-          "-f",
-          "bestaudio/best",
-          "-o",
-          "-",
-          "--no-playlist",
-          "--extractor-args",
-          "youtube:player_client=android",
-          item.url,
-        ],
-        {
-          stdio: ["ignore", "pipe", "pipe"],
-        },
-      );
+      const ytdlpArgs: string[] = [
+        "-f",
+        "bestaudio/best",
+        "-o",
+        "-",
+        "--no-playlist",
+        "--extractor-args",
+        "youtube:player_client=android,tv_embedded",
+      ];
 
-      // Simple ffmpeg transcoding
+      const cookiesBrowser = process.env.YTDLP_COOKIES_BROWSER;
+      if (cookiesBrowser) {
+        ytdlpArgs.push("--cookies-from-browser", cookiesBrowser);
+      }
+
+      ytdlpArgs.push(item.url);
+
+      const ytdlp = spawn("yt-dlp", ytdlpArgs, {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
       const ffmpeg = spawn(
         "ffmpeg",
         [
@@ -131,16 +152,15 @@ export class MusicService {
         },
       );
 
-      ytdlp.stderr.on("data", (data) => {
+      ytdlp.stderr!.on("data", (data: Buffer) => {
         const msg = data.toString();
         if (msg.includes("ERROR")) {
           console.error("❌ yt-dlp error:", msg);
         }
       });
 
-      ffmpeg.stderr.on("data", (data) => {
+      ffmpeg.stderr!.on("data", (data: Buffer) => {
         const msg = data.toString();
-        // Ignore cleanup errors that don't affect playback
         if (
           msg.includes("Error writing trailer") ||
           msg.includes("Error closing file") ||
@@ -156,34 +176,35 @@ export class MusicService {
 
       ytdlp.on("error", (error) => {
         console.error("❌ yt-dlp process error:", error);
+        this.currentSong = null;
         this.playNext();
       });
 
       ffmpeg.on("error", (error) => {
         console.error("❌ ffmpeg process error:", error);
+        this.currentSong = null;
         this.playNext();
       });
 
-      ffmpeg.stdin.on("error", (error) => {
-        // Ignore EPIPE errors - they're normal when the stream ends
-        if (error.code !== "EPIPE") {
+      ffmpeg.stdin!.on("error", (error: Error) => {
+        if ((error as NodeJS.ErrnoException).code !== "EPIPE") {
           console.error("❌ ffmpeg stdin error:", error);
         }
       });
 
-      ytdlp.stdout.on("error", (error) => {
-        // Ignore EPIPE errors
-        if (error.code !== "EPIPE") {
+      ytdlp.stdout!.on("error", (error: Error) => {
+        if ((error as NodeJS.ErrnoException).code !== "EPIPE") {
           console.error("❌ yt-dlp stdout error:", error);
         }
       });
 
-      ytdlp.stdout.pipe(ffmpeg.stdin);
+      ytdlp.stdout!.pipe(ffmpeg.stdin!);
 
-      const resource = createAudioResource(ffmpeg.stdout, {
+      const resource = createAudioResource(ffmpeg.stdout!, {
         inputType: StreamType.Raw,
       });
 
+      this.currentSong = item;
       this.player!.play(resource);
       this.isPlaying = true;
 
@@ -191,6 +212,7 @@ export class MusicService {
       console.log(`🔊 Player state: ${this.player!.state.status}`);
     } catch (error) {
       console.error("❌ Playback error:", error);
+      this.currentSong = null;
       this.playNext();
     }
   }
@@ -203,17 +225,26 @@ export class MusicService {
 
   private async resolveTrack(
     searchOrUrl: string,
-  ): Promise<{ url: string; title: string }> {
-    // Check if it's already a URL
+  ): Promise<{ url: string; title: string; duration?: string }> {
     if (
       searchOrUrl.includes("youtube.com") ||
       searchOrUrl.includes("youtu.be")
     ) {
       console.log("🔗 YouTube URL detected");
-      return { url: searchOrUrl, title: "YouTube Video" };
+      try {
+        const info = await video_info(searchOrUrl);
+        const title = info.video_details.title ?? "YouTube Video";
+        const durationInSec = info.video_details.durationInSec;
+        const duration =
+          durationInSec > 0 ? formatDuration(durationInSec) : undefined;
+        console.log(`✅ Found: ${title}`);
+        return { url: searchOrUrl, title, duration };
+      } catch (error) {
+        console.error("⚠️ Failed to fetch video info:", error);
+        return { url: searchOrUrl, title: "YouTube Video" };
+      }
     }
 
-    // Search for the video
     console.log(`🔍 Searching for: ${searchOrUrl}`);
     const searchResults = await search(searchOrUrl, {
       limit: 1,
@@ -230,16 +261,28 @@ export class MusicService {
     }
 
     console.log(`✅ Found: ${video.title}`);
+    const duration =
+      video.durationInSec > 0 ? formatDuration(video.durationInSec) : undefined;
 
     return {
       url: video.url,
-      title: video.title || "Unknown",
+      title: video.title ?? "Unknown",
+      duration,
     };
+  }
+
+  getCurrentSong(): QueueItem | null {
+    return this.currentSong;
+  }
+
+  getQueue(): QueueItem[] {
+    return [...this.queue];
   }
 
   disconnect() {
     this.queue = [];
     this.isPlaying = false;
+    this.currentSong = null;
     if (this.connection) {
       this.connection.destroy();
       this.connection = null;

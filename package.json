@@ -9,7 +9,7 @@
   "private": true,
   "devDependencies": {
     "@types/bun": "latest",
-    "@types/node": "^24.12.0"
+    "@types/node": "^24.12.2"
   },
   "peerDependencies": {
     "typescript": "^5.9.3"
@@ -17,8 +17,8 @@
   "dependencies": {
     "@discordjs/opus": "^0.10.0",
     "@discordjs/voice": "^0.19.2",
-    "@snazzah/davey": "^0.1.10",
-    "discord.js": "^14.25.1",
+    "@snazzah/davey": "^0.1.11",
+    "discord.js": "^14.26.2",
     "opusscript": "^0.1.1",
     "play-dl": "^1.9.7",
     "sodium-native": "^5.1.0",

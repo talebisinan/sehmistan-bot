@@ -2,11 +2,8 @@ import { Client, GatewayIntentBits, REST, Routes } from "discord.js";
 import { config } from "./config";
 import { commands, handleCommand } from "./commands/CommandHandler";
 
-// Suppress TimeoutNegativeWarning from discord.js voice (harmless streaming latency)
 process.on("warning", (warning) => {
-  if (warning.name === "TimeoutNegativeWarning") {
-    return; // Ignore this specific warning
-  }
+  if (warning.name === "TimeoutNegativeWarning") return;
   console.warn(warning);
 });
 
@@ -33,9 +30,10 @@ async function registerCommands() {
   try {
     console.log("🔄 Registering slash commands...");
 
-    await rest.put(Routes.applicationCommands(config.clientId), {
-      body: commands.map((cmd) => cmd.toJSON()),
-    });
+    await rest.put(
+      Routes.applicationGuildCommands(config.clientId, config.guildId),
+      { body: commands.map((cmd) => cmd.toJSON()) },
+    );
 
     console.log("✅ Slash commands registered!");
   } catch (error) {
