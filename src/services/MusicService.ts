@@ -13,6 +13,10 @@ import {
 import type { VoiceBasedChannel } from "discord.js";
 import { search, video_info, playlist_info } from "play-dl";
 import { spawn, ChildProcess } from "child_process";
+import { createReadStream, unlink } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
+import { PassThrough } from "stream";
 
 export interface QueueItem {
   url: string;
@@ -52,6 +56,14 @@ export class MusicService {
   private pendingSeek: number | null = null;
   private ytdlpProcess: ChildProcess | null = null;
   private ffmpegProcess: ChildProcess | null = null;
+  private currentFileStream: ReturnType<typeof createReadStream> | null = null;
+  private prefetch: {
+    url: string;
+    path: string;
+    ready: boolean;
+    ytdlp: ChildProcess;
+    ffmpeg: ChildProcess;
+  } | null = null;
 
   async play(
     channel: VoiceBasedChannel,
@@ -62,18 +74,11 @@ export class MusicService {
       return this.playPlaylist(channel, urlOrQuery, requestedBy);
     }
 
-    const { url, title, duration, durationSec } = await this.resolveTrack(urlOrQuery);
-    this.queue.push({ url, title, duration, durationSec, requestedBy });
-
-    if (!this.connection) {
-      await this.initConnection(channel);
-    }
-
-    if (!this.isPlaying) {
-      this.playNext();
-    }
-
-    return { title, duration, queued: 1 };
+    const { url, title, durationSec = 0 } = await this.resolveTrack(urlOrQuery);
+    const item = this.createQueueItem(url, title, durationSec, requestedBy);
+    this.queue.push(item);
+    await this.ensurePlayback(channel);
+    return { title: item.title, duration: item.duration, queued: 1 };
   }
 
   private isPlaylistUrl(url: string): boolean {
@@ -102,29 +107,18 @@ export class MusicService {
 
     for (const v of videos) {
       if (!v.url || !v.title) continue;
-      this.queue.push({
-        url: v.url,
-        title: v.title,
-        requestedBy,
-        duration: v.durationInSec > 0 ? formatDuration(v.durationInSec) : undefined,
-        durationSec: v.durationInSec,
-      });
+      this.queue.push(this.createQueueItem(v.url, v.title, v.durationInSec, requestedBy));
     }
 
-    if (!this.connection) {
-      await this.initConnection(channel);
-    }
+    await this.ensurePlayback(channel);
 
-    if (!this.isPlaying) {
-      this.playNext();
-    }
-
-    const first = videos[0]!;
-    return {
-      title: first.title ?? "Unknown",
-      duration: first.durationInSec > 0 ? formatDuration(first.durationInSec) : undefined,
-      queued: videos.length,
-    };
+    const first = this.createQueueItem(
+      videos[0]!.url,
+      videos[0]!.title ?? "Unknown",
+      videos[0]!.durationInSec,
+      requestedBy,
+    );
+    return { title: first.title, duration: first.duration, queued: videos.length };
   }
 
   async searchTracks(query: string): Promise<SearchResult[]> {
@@ -192,6 +186,10 @@ export class MusicService {
   }
 
   private killCurrentProcesses(): void {
+    if (this.currentFileStream) {
+      this.currentFileStream.destroy();
+      this.currentFileStream = null;
+    }
     if (this.ytdlpProcess) {
       this.ytdlpProcess.kill("SIGKILL");
       this.ytdlpProcess = null;
@@ -216,6 +214,118 @@ export class MusicService {
     }
   }
 
+  private createQueueItem(
+    url: string,
+    title: string,
+    durationSec: number,
+    requestedBy: string,
+  ): QueueItem {
+    return {
+      url,
+      title,
+      requestedBy,
+      duration: durationSec > 0 ? formatDuration(durationSec) : undefined,
+      durationSec,
+    };
+  }
+
+  private async ensurePlayback(channel: VoiceBasedChannel): Promise<void> {
+    if (!this.connection) await this.initConnection(channel);
+    if (!this.isPlaying) this.playNext();
+  }
+
+  private buildFfmpegArgs(seekSeconds: number): string[] {
+    const args = ["-i", "pipe:0"];
+    if (seekSeconds > 0) args.push("-ss", String(seekSeconds));
+    args.push(
+      "-fflags", "+nobuffer",
+      "-flags", "low_delay",
+      "-f", "s16le",
+      "-ar", "48000",
+      "-ac", "2",
+      "-loglevel", "error",
+      "pipe:1",
+    );
+    return args;
+  }
+
+  private buildYtdlpArgs(url: string): string[] {
+    const args = [
+      "-f", "bestaudio/best",
+      "-o", "-",
+      "--no-playlist",
+      "--extractor-args", "youtube:player_client=android,tv_embedded",
+    ];
+    const cookiesBrowser = process.env.YTDLP_COOKIES_BROWSER;
+    if (cookiesBrowser) args.push("--cookies-from-browser", cookiesBrowser);
+    args.push(url);
+    return args;
+  }
+
+  private startPrefetch(item: QueueItem): void {
+    if (this.prefetch?.url === item.url) return;
+    this.cancelPrefetch();
+
+    const tmpPath = join(tmpdir(), `sehmistan-${Date.now()}.pcm`);
+    const ytdlp = spawn("yt-dlp", this.buildYtdlpArgs(item.url), {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const ffmpeg = spawn(
+      "ffmpeg",
+      ["-i", "pipe:0", "-f", "s16le", "-ar", "48000", "-ac", "2", "-loglevel", "error", tmpPath],
+      { stdio: ["pipe", "ignore", "pipe"] },
+    );
+
+    ytdlp.stdout!.pipe(ffmpeg.stdin!);
+    ytdlp.stdout!.on("error", (e: NodeJS.ErrnoException) => {
+      if (e.code !== "EPIPE") console.error("❌ prefetch yt-dlp stdout error:", e);
+    });
+    ffmpeg.stdin!.on("error", (e: NodeJS.ErrnoException) => {
+      if (e.code !== "EPIPE") console.error("❌ prefetch ffmpeg stdin error:", e);
+    });
+
+    this.prefetch = { url: item.url, path: tmpPath, ready: false, ytdlp, ffmpeg };
+
+    ffmpeg.on("close", (code) => {
+      if (this.prefetch?.url === item.url) {
+        if (code === 0) {
+          this.prefetch.ready = true;
+          console.log(`📦 Prefetched: ${item.title}`);
+        } else {
+          this.cancelPrefetch();
+        }
+      }
+    });
+    ytdlp.on("error", () => this.cancelPrefetch());
+    ffmpeg.on("error", () => this.cancelPrefetch());
+  }
+
+  private cancelPrefetch(): void {
+    if (!this.prefetch) return;
+    const { ytdlp, ffmpeg, path: tmpPath } = this.prefetch;
+    this.prefetch = null;
+    ytdlp.kill("SIGKILL");
+    ffmpeg.kill("SIGKILL");
+    unlink(tmpPath, () => {});
+  }
+
+  private setupProcessHandlers(ytdlp: ChildProcess, ffmpeg: ChildProcess): void {
+    const onFatal = (name: string) => (err: Error) => {
+      console.error(`❌ ${name} process error:`, err);
+      this.currentSong = null;
+      this.playNext();
+    };
+    const onStream = (name: string) => (err: Error) => {
+      if ((err as NodeJS.ErrnoException).code !== "EPIPE")
+        console.error(`❌ ${name} error:`, err);
+    };
+
+    ytdlp.on("error", onFatal("yt-dlp"));
+    ffmpeg.on("error", onFatal("ffmpeg"));
+    ffmpeg.stdin!.on("error", onStream("ffmpeg stdin"));
+    ytdlp.stdout!.on("error", onStream("yt-dlp stdout"));
+  }
+
   private async playNext(seekSeconds = 0): Promise<void> {
     this.cancelIdleTimer();
 
@@ -230,116 +340,76 @@ export class MusicService {
 
     try {
       console.log(`🎵 Loading: ${item.title}`);
-
       this.killCurrentProcesses();
 
-      const ytdlpArgs: string[] = [
-        "-f",
-        "bestaudio/best",
-        "-o",
-        "-",
-        "--no-playlist",
-        "--extractor-args",
-        "youtube:player_client=android,tv_embedded",
-      ];
+      // Play from pre-fetched PCM file if ready.
+      // PCM is constant bitrate (192 000 bytes/sec) so seeks are a byte offset.
+      if (this.prefetch?.url === item.url && this.prefetch.ready) {
+        const prefetchPath = this.prefetch.path;
+        this.prefetch = null;
 
-      const cookiesBrowser = process.env.YTDLP_COOKIES_BROWSER;
-      if (cookiesBrowser) {
-        ytdlpArgs.push("--cookies-from-browser", cookiesBrowser);
+        const startByte = seekSeconds > 0 ? seekSeconds * 192_000 : 0;
+        const fileStream = createReadStream(prefetchPath, {
+          start: startByte,
+          highWaterMark: 10 * 1024 * 1024,
+        });
+        this.currentFileStream = fileStream;
+        fileStream.on("close", () => unlink(prefetchPath, () => {}));
+
+        const resource = createAudioResource(fileStream, { inputType: StreamType.Raw });
+        this.currentSong = item;
+        this.player!.play(resource);
+        this.isPlaying = true;
+        console.log(`▶️  Now playing (buffered): ${item.title}`);
+      } else {
+        // Prefetch in-progress for this song is now redundant — cancel it.
+        if (this.prefetch?.url === item.url) this.cancelPrefetch();
+
+        const ytdlp = spawn("yt-dlp", this.buildYtdlpArgs(item.url), {
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        this.ytdlpProcess = ytdlp;
+
+        const ffmpeg = spawn("ffmpeg", this.buildFfmpegArgs(seekSeconds), {
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+        this.ffmpegProcess = ffmpeg;
+
+        ytdlp.stderr!.on("data", (data: Buffer) => {
+          const msg = data.toString();
+          if (msg.includes("ERROR")) console.error("❌ yt-dlp error:", msg);
+        });
+
+        ffmpeg.stderr!.on("data", (data: Buffer) => {
+          const msg = data.toString();
+          if (
+            msg.includes("Error writing trailer") ||
+            msg.includes("Error closing file") ||
+            msg.includes("Error muxing a packet") ||
+            msg.includes("Error submitting a packet")
+          ) return;
+          if (msg.includes("Error") || msg.includes("error"))
+            console.error("❌ ffmpeg error:", msg);
+        });
+
+        this.setupProcessHandlers(ytdlp, ffmpeg);
+        ytdlp.stdout!.pipe(ffmpeg.stdin!);
+
+        // 10 MB in-memory buffer so brief network hiccups don't stall the player.
+        const buffer = new PassThrough({ highWaterMark: 10 * 1024 * 1024 });
+        ffmpeg.stdout!.pipe(buffer);
+
+        const resource = createAudioResource(buffer, { inputType: StreamType.Raw });
+        this.currentSong = item;
+        this.player!.play(resource);
+        this.isPlaying = true;
+        console.log(`▶️  Now playing: ${item.title}`);
       }
 
-      ytdlpArgs.push(item.url);
-
-      const ytdlp = spawn("yt-dlp", ytdlpArgs, {
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      this.ytdlpProcess = ytdlp;
-
-      const ffmpegArgs: string[] = ["-i", "pipe:0"];
-
-      if (seekSeconds > 0) {
-        ffmpegArgs.push("-ss", String(seekSeconds));
-      }
-
-      ffmpegArgs.push(
-        "-fflags",
-        "+nobuffer",
-        "-flags",
-        "low_delay",
-        "-f",
-        "s16le",
-        "-ar",
-        "48000",
-        "-ac",
-        "2",
-        "-loglevel",
-        "error",
-        "pipe:1",
-      );
-
-      const ffmpeg = spawn("ffmpeg", ffmpegArgs, {
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-      this.ffmpegProcess = ffmpeg;
-
-      ytdlp.stderr!.on("data", (data: Buffer) => {
-        const msg = data.toString();
-        if (msg.includes("ERROR")) {
-          console.error("❌ yt-dlp error:", msg);
-        }
-      });
-
-      ffmpeg.stderr!.on("data", (data: Buffer) => {
-        const msg = data.toString();
-        if (
-          msg.includes("Error writing trailer") ||
-          msg.includes("Error closing file") ||
-          msg.includes("Error muxing a packet") ||
-          msg.includes("Error submitting a packet")
-        ) {
-          return;
-        }
-        if (msg.includes("Error") || msg.includes("error")) {
-          console.error("❌ ffmpeg error:", msg);
-        }
-      });
-
-      ytdlp.on("error", (error) => {
-        console.error("❌ yt-dlp process error:", error);
-        this.currentSong = null;
-        this.playNext();
-      });
-
-      ffmpeg.on("error", (error) => {
-        console.error("❌ ffmpeg process error:", error);
-        this.currentSong = null;
-        this.playNext();
-      });
-
-      ffmpeg.stdin!.on("error", (error: Error) => {
-        if ((error as NodeJS.ErrnoException).code !== "EPIPE") {
-          console.error("❌ ffmpeg stdin error:", error);
-        }
-      });
-
-      ytdlp.stdout!.on("error", (error: Error) => {
-        if ((error as NodeJS.ErrnoException).code !== "EPIPE") {
-          console.error("❌ yt-dlp stdout error:", error);
-        }
-      });
-
-      ytdlp.stdout!.pipe(ffmpeg.stdin!);
-
-      const resource = createAudioResource(ffmpeg.stdout!, {
-        inputType: StreamType.Raw,
-      });
-
-      this.currentSong = item;
-      this.player!.play(resource);
-      this.isPlaying = true;
-
-      console.log(`▶️  Now playing: ${item.title}`);
       console.log(`🔊 Player state: ${this.player!.state.status}`);
+
+      // Kick off background download of the next song while this one plays.
+      if (this.queue.length > 0) this.startPrefetch(this.queue[0]!);
     } catch (error) {
       console.error("❌ Playback error:", error);
       this.currentSong = null;
@@ -411,6 +481,7 @@ export class MusicService {
 
   disconnect() {
     this.cancelIdleTimer();
+    this.cancelPrefetch();
     this.killCurrentProcesses();
     this.queue = [];
     this.isPlaying = false;

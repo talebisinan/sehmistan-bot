@@ -10,11 +10,17 @@
 | `/pl <query>` | Search YouTube and pick from a list of 5 results using a dropdown menu. | ✅ |
 | `/s` | Skip the currently playing song. | ✅ |
 | `/seek <position>` | Seek to a position in the current song. Accepts `mm:ss` (e.g. `1:30`) or seconds (e.g. `90`). | ✅ |
-| `/q` | Show the full music queue — currently playing song at the top, then up to 10 upcoming songs with durations and who queued them. | ❌ |
-| `/np` | Show the currently playing song as a clickable link with its duration and requester. | ❌ |
+| `/q` | Show the full music queue — currently playing song (as a clickable link with duration) at the top, then up to 10 upcoming songs with durations and who queued them. | ❌ |
 | `/kufur` | Reply with a random Turkish swear word. | ❌ |
 
 The bot automatically disconnects from the voice channel after 3 minutes of inactivity.
+
+## Playback
+
+Audio is streamed via `yt-dlp` → `ffmpeg` → Discord with two layers of buffering to prevent interruptions:
+
+- **In-memory buffer** — a 10 MB PassThrough buffer sits between ffmpeg and the Discord player, absorbing up to ~50 seconds of network hiccups without cutting out.
+- **Pre-fetch** — while a song plays, the next queue item is silently downloaded to a temp PCM file in the background. When its turn comes, playback reads from disk with no network dependency. Seek on a pre-fetched song is instant (constant-bitrate byte offset, no re-download).
 
 ## Installation
 
@@ -58,7 +64,7 @@ GUILD_ID=your_server_id
 - **CLIENT_ID** — Application ID, found on the General Information page of your app
 - **GUILD_ID** — Your server's ID. Right-click the server name in Discord → **Copy Server ID** (requires Developer Mode: Settings → Advanced → Developer Mode)
 
-### Age-restricted videos
+### YouTube session import (optional)
 
 If a video requires sign-in, set this optional variable to let yt-dlp borrow your browser's YouTube session:
 

@@ -3,11 +3,14 @@ import {
   ChatInputCommandInteraction,
   EmbedBuilder,
   GuildMember,
+  MessageFlags,
   SlashCommandBuilder,
   StringSelectMenuBuilder,
   StringSelectMenuInteraction,
 } from "discord.js";
 import { MusicService, formatDuration } from "../services/MusicService";
+
+const EMBED_COLOR = 0xff0000;
 
 const musicServices = new Map<string, MusicService>();
 
@@ -16,6 +19,18 @@ function getOrCreateService(guildId: string): MusicService {
     musicServices.set(guildId, new MusicService());
   }
   return musicServices.get(guildId)!;
+}
+
+async function requireVoiceChannel(
+  interaction: ChatInputCommandInteraction | StringSelectMenuInteraction,
+  member: GuildMember,
+) {
+  const ch = member.voice.channel;
+  if (!ch) {
+    await interaction.reply({ content: "❌ You need to be in a voice channel!", flags: MessageFlags.Ephemeral });
+    return null;
+  }
+  return ch;
 }
 
 function isUrl(s: string): boolean {
@@ -74,9 +89,6 @@ export const commands = [
   new SlashCommandBuilder()
     .setName("q")
     .setDescription("Show the current music queue"),
-  new SlashCommandBuilder()
-    .setName("np")
-    .setDescription("Show the currently playing song"),
 ];
 
 export async function handleCommand(
@@ -88,14 +100,8 @@ export async function handleCommand(
   try {
     switch (interaction.commandName) {
       case "pl": {
-        const voiceChannel = member.voice.channel;
-        if (!voiceChannel) {
-          await interaction.reply({
-            content: "❌ You need to be in a voice channel!",
-            ephemeral: true,
-          });
-          return;
-        }
+        const voiceChannel = await requireVoiceChannel(interaction, member);
+        if (!voiceChannel) return;
 
         const query = interaction.options.getString("query", true);
         await interaction.deferReply();
@@ -120,7 +126,7 @@ export async function handleCommand(
         const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select);
 
         const embed = new EmbedBuilder()
-          .setColor(0xff0000)
+          .setColor(EMBED_COLOR)
           .setTitle(`🔍 Results for: ${query}`)
           .setDescription(
             results
@@ -136,14 +142,8 @@ export async function handleCommand(
       }
 
       case "p": {
-        const voiceChannel = member.voice.channel;
-        if (!voiceChannel) {
-          await interaction.reply({
-            content: "❌ You need to be in a voice channel!",
-            ephemeral: true,
-          });
-          return;
-        }
+        const voiceChannel = await requireVoiceChannel(interaction, member);
+        if (!voiceChannel) return;
 
         const query = interaction.options.getString("query", true);
         const requestedBy = member.user.username;
@@ -160,7 +160,7 @@ export async function handleCommand(
         const isNowPlaying = service.getQueueLength() === 0 && !isPlaylist;
 
         const embed = new EmbedBuilder()
-          .setColor(0xff0000)
+          .setColor(EMBED_COLOR)
           .setTitle(
             isPlaylist
               ? "📋 Playlist Added"
@@ -190,14 +190,7 @@ export async function handleCommand(
       }
 
       case "s": {
-        const voiceChannel = member.voice.channel;
-        if (!voiceChannel) {
-          await interaction.reply({
-            content: "❌ You need to be in a voice channel!",
-            ephemeral: true,
-          });
-          return;
-        }
+        if (!await requireVoiceChannel(interaction, member)) return;
 
         const skipped = service.skip();
         await interaction.reply(skipped ? "⏭️ Skipped!" : "❌ Nothing to skip!");
@@ -205,14 +198,7 @@ export async function handleCommand(
       }
 
       case "seek": {
-        const voiceChannel = member.voice.channel;
-        if (!voiceChannel) {
-          await interaction.reply({
-            content: "❌ You need to be in a voice channel!",
-            ephemeral: true,
-          });
-          return;
-        }
+        if (!await requireVoiceChannel(interaction, member)) return;
 
         const input = interaction.options.getString("position", true);
         const seconds = parseSeekPosition(input);
@@ -220,7 +206,7 @@ export async function handleCommand(
         if (seconds < 0) {
           await interaction.reply({
             content: "❌ Invalid position. Use `1:30` or `90` (seconds).",
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
           return;
         }
@@ -229,7 +215,7 @@ export async function handleCommand(
         if (!sought) {
           await interaction.reply({
             content: "❌ Nothing is playing right now!",
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
           return;
         }
@@ -257,17 +243,17 @@ export async function handleCommand(
         if (!currentSong && queue.length === 0) {
           await interaction.reply({
             content: "📭 The queue is empty!",
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
           return;
         }
 
-        const embed = new EmbedBuilder().setColor(0xff0000).setTitle("🎵 Music Queue");
+        const embed = new EmbedBuilder().setColor(EMBED_COLOR).setTitle("🎵 Music Queue");
 
         if (currentSong) {
           const titlePart = currentSong.duration
-            ? `**${currentSong.title}** \`${currentSong.duration}\``
-            : `**${currentSong.title}**`;
+            ? `**[${currentSong.title}](${currentSong.url})** \`${currentSong.duration}\``
+            : `**[${currentSong.title}](${currentSong.url})**`;
           embed.addFields({
             name: "▶️ Now Playing",
             value: `${titlePart}\nRequested by **${currentSong.requestedBy}**`,
@@ -294,34 +280,6 @@ export async function handleCommand(
         break;
       }
 
-      case "np": {
-        const currentSong = service.getCurrentSong();
-
-        if (!currentSong) {
-          await interaction.reply({
-            content: "❌ Nothing is playing right now!",
-            ephemeral: true,
-          });
-          return;
-        }
-
-        const embed = new EmbedBuilder()
-          .setColor(0xff0000)
-          .setTitle("▶️ Now Playing")
-          .setDescription(`**[${currentSong.title}](${currentSong.url})**`)
-          .setFooter({ text: `Requested by ${currentSong.requestedBy}` });
-
-        if (currentSong.duration) {
-          embed.addFields({
-            name: "⏱️ Duration",
-            value: currentSong.duration,
-            inline: true,
-          });
-        }
-
-        await interaction.reply({ embeds: [embed] });
-        break;
-      }
     }
   } catch (error) {
     console.error("Command error:", error);
@@ -330,7 +288,7 @@ export async function handleCommand(
     if (interaction.deferred) {
       await interaction.editReply({ content: message });
     } else {
-      await interaction.reply({ content: message, ephemeral: true });
+      await interaction.reply({ content: message, flags: MessageFlags.Ephemeral });
     }
   }
 }
@@ -341,15 +299,8 @@ export async function handleSelectMenu(
   if (interaction.customId !== "music-search") return;
 
   const member = interaction.member as GuildMember;
-  const voiceChannel = member.voice.channel;
-
-  if (!voiceChannel) {
-    await interaction.reply({
-      content: "❌ You need to be in a voice channel!",
-      ephemeral: true,
-    });
-    return;
-  }
+  const voiceChannel = await requireVoiceChannel(interaction, member);
+  if (!voiceChannel) return;
 
   const url = interaction.values[0];
   if (!url) return;
@@ -365,7 +316,7 @@ export async function handleSelectMenu(
     const isNowPlaying = queueLength === 0;
 
     const embed = new EmbedBuilder()
-      .setColor(0xff0000)
+      .setColor(EMBED_COLOR)
       .setTitle(isNowPlaying ? "▶️ Now Playing" : "➕ Added to Queue")
       .setDescription(`**${title}**`)
       .setFooter({ text: `Requested by ${requestedBy}` });
