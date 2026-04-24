@@ -75,6 +75,9 @@ export const commands = [
     .setName("s")
     .setDescription("Skip the current song"),
   new SlashCommandBuilder()
+    .setName("stop")
+    .setDescription("Stop playback and clear the entire queue"),
+  new SlashCommandBuilder()
     .setName("seek")
     .setDescription("Seek to a position in the current song")
     .addStringOption((option) =>
@@ -98,6 +101,15 @@ export const commands = [
         .setDescription("Number of messages to delete (1–100, default 10)")
         .setMinValue(1)
         .setMaxValue(100),
+    ),
+  new SlashCommandBuilder()
+    .setName("radio")
+    .setDescription("Start a YouTube radio/mix based on the current song or a query")
+    .addStringOption((option) =>
+      option
+        .setName("query")
+        .setDescription("Song name or YouTube URL to seed the radio (optional — defaults to current song)")
+        .setRequired(false),
     ),
 ];
 
@@ -204,6 +216,13 @@ export async function handleCommand(
 
         const skipped = service.skip();
         await interaction.reply(skipped ? "⏭️ Skipped!" : "❌ Nothing to skip!");
+        break;
+      }
+
+      case "stop": {
+        if (!await requireVoiceChannel(interaction, member)) return;
+        const stopped = service.stop();
+        await interaction.reply(stopped ? "⏹️ Stopped and queue cleared!" : "❌ Nothing is playing!");
         break;
       }
 
@@ -338,6 +357,51 @@ export async function handleCommand(
         break;
       }
 
+      case "radio": {
+        const voiceChannel = await requireVoiceChannel(interaction, member);
+        if (!voiceChannel) return;
+
+        const query = interaction.options.getString("query"); // optional
+        const requestedBy = member.user.username;
+
+        await interaction.deferReply();
+
+        const { seedTitle, queued, tracks } = await service.startRadio(voiceChannel, query, requestedBy);
+
+        const embed = new EmbedBuilder()
+          .setColor(EMBED_COLOR)
+          .setTitle("📻 Radio Started")
+          .setDescription(`Seeded from **${seedTitle}**`)
+          .addFields({ name: "🎵 Songs Queued", value: String(queued), inline: true })
+          .setFooter({ text: `Started by ${requestedBy}` });
+
+        const snapshot = tracks.slice(0, 25);
+
+        if (snapshot.length === 0) {
+          await interaction.editReply({ embeds: [embed] });
+          break;
+        }
+
+        const options = snapshot.map((item, i) => {
+          const label = `${i + 1}. ${item.title}`.slice(0, 100);
+          const opt: { label: string; value: string; description?: string } = {
+            label,
+            value: item.url,
+          };
+          if (item.duration) opt.description = `⏱️ ${item.duration}`;
+          return opt;
+        });
+
+        const select = new StringSelectMenuBuilder()
+          .setCustomId("queue-jump")
+          .setPlaceholder("⏭️ Jump to a song…")
+          .addOptions(options);
+
+        const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select);
+        await interaction.editReply({ embeds: [embed], components: [row] });
+        break;
+      }
+
     }
   } catch (error) {
     console.error("Command error:", error);
@@ -354,49 +418,106 @@ export async function handleCommand(
 export async function handleSelectMenu(
   interaction: StringSelectMenuInteraction,
 ): Promise<void> {
-  if (interaction.customId !== "music-search") return;
+  if (interaction.customId === "music-search") {
+    const member = interaction.member as GuildMember;
+    const voiceChannel = await requireVoiceChannel(interaction, member);
+    if (!voiceChannel) return;
 
-  const member = interaction.member as GuildMember;
-  const voiceChannel = await requireVoiceChannel(interaction, member);
-  if (!voiceChannel) return;
+    const url = interaction.values[0];
+    if (!url) return;
 
-  const url = interaction.values[0];
-  if (!url) return;
+    const requestedBy = member.user.username;
+    const service = getOrCreateService(interaction.guildId!);
 
-  const requestedBy = member.user.username;
-  const service = getOrCreateService(interaction.guildId!);
+    await interaction.deferUpdate();
 
-  await interaction.deferUpdate();
+    try {
+      const { title, duration } = await service.play(voiceChannel, url, requestedBy);
+      const queueLength = service.getQueueLength();
+      const isNowPlaying = queueLength === 0;
 
-  try {
-    const { title, duration } = await service.play(voiceChannel, url, requestedBy);
-    const queueLength = service.getQueueLength();
-    const isNowPlaying = queueLength === 0;
+      const embed = new EmbedBuilder()
+        .setColor(EMBED_COLOR)
+        .setTitle(isNowPlaying ? "▶️ Now Playing" : "➕ Added to Queue")
+        .setDescription(`**${title}**`)
+        .setFooter({ text: `Requested by ${requestedBy}` });
 
-    const embed = new EmbedBuilder()
-      .setColor(EMBED_COLOR)
-      .setTitle(isNowPlaying ? "▶️ Now Playing" : "➕ Added to Queue")
-      .setDescription(`**${title}**`)
-      .setFooter({ text: `Requested by ${requestedBy}` });
+      if (duration) {
+        embed.addFields({ name: "⏱️ Duration", value: duration, inline: true });
+      }
 
-    if (duration) {
-      embed.addFields({ name: "⏱️ Duration", value: duration, inline: true });
-    }
+      if (queueLength > 0) {
+        embed.addFields({
+          name: "📝 Queue Position",
+          value: `#${queueLength + 1}`,
+          inline: true,
+        });
+      }
 
-    if (queueLength > 0) {
-      embed.addFields({
-        name: "📝 Queue Position",
-        value: `#${queueLength + 1}`,
-        inline: true,
+      await interaction.editReply({ embeds: [embed], components: [] });
+    } catch (error) {
+      console.error("Select menu error:", error);
+      await interaction.editReply({
+        content: `❌ Error: ${error instanceof Error ? error.message : "Unknown error"}`,
+        components: [],
       });
     }
+    return;
+  }
 
-    await interaction.editReply({ embeds: [embed], components: [] });
-  } catch (error) {
-    console.error("Select menu error:", error);
-    await interaction.editReply({
-      content: `❌ Error: ${error instanceof Error ? error.message : "Unknown error"}`,
-      components: [],
+  if (interaction.customId === "queue-jump") {
+    const url = interaction.values[0];
+    if (!url) return;
+
+    const service = getOrCreateService(interaction.guildId!);
+
+    await interaction.deferUpdate();
+
+    const title = service.jumpTo(url);
+
+    if (!title) {
+      await interaction.editReply({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(EMBED_COLOR)
+            .setDescription("❌ That song is no longer in the queue — it may have already played."),
+        ],
+        components: [],
+      });
+      return;
+    }
+
+    // Rebuild the dropdown from the updated queue so the user can keep jumping.
+    const remaining = service.getQueue().slice(0, 25);
+
+    const successEmbed = new EmbedBuilder()
+      .setColor(EMBED_COLOR)
+      .setTitle("⏭️ Jumping to…")
+      .setDescription(`**${title}**`);
+
+    if (remaining.length === 0) {
+      await interaction.editReply({ embeds: [successEmbed], components: [] });
+      return;
+    }
+
+    const jumpOptions = remaining.map((item, i) => {
+      const label = `${i + 1}. ${item.title}`.slice(0, 100);
+      const opt: { label: string; value: string; description?: string } = {
+        label,
+        value: item.url,
+      };
+      if (item.duration) opt.description = `⏱️ ${item.duration}`;
+      return opt;
     });
+
+    const jumpSelect = new StringSelectMenuBuilder()
+      .setCustomId("queue-jump")
+      .setPlaceholder("⏭️ Jump to a song…")
+      .addOptions(jumpOptions);
+
+    const jumpRow = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(jumpSelect);
+
+    await interaction.editReply({ embeds: [successEmbed], components: [jumpRow] });
+    return;
   }
 }
