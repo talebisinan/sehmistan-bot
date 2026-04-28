@@ -111,6 +111,9 @@ export const commands = [
         .setDescription("Song name or YouTube URL to seed the radio (optional — defaults to current song)")
         .setRequired(false),
     ),
+  new SlashCommandBuilder()
+    .setName("help")
+    .setDescription("Show all available bot commands"),
 ];
 
 export async function handleCommand(
@@ -354,6 +357,44 @@ export async function handleCommand(
         } catch (error) {
           await interaction.editReply({ content: `❌ Error: ${error instanceof Error ? error.message : "Unknown error"}` });
         }
+        break;
+      }
+
+      case "help": {
+        const embed = new EmbedBuilder()
+          .setColor(EMBED_COLOR)
+          .setTitle("🎵 Bot Commands")
+          .addFields(
+            {
+              name: "🎶 Playback",
+              value: [
+                "`/p <query>` — Play a song by name or YouTube URL",
+                "`/pl <query>` — Search YouTube and pick from 5 results",
+                "`/radio [query]` — Start a YouTube radio mix (seeds from current song if no query given)",
+                "`/s` — Skip the current song",
+                "`/stop` — Stop playback and clear the entire queue",
+                "`/seek <position>` — Seek within the current song (e.g. `1:30` or `90`)",
+              ].join("\n"),
+            },
+            {
+              name: "📋 Queue",
+              value: [
+                "`/q` — Show the current queue and now-playing song",
+                "> Use the dropdown on `/radio` to jump directly to any queued song",
+              ].join("\n"),
+            },
+            {
+              name: "🧹 Utility",
+              value: [
+                "`/clean [amount]` — Bulk-delete recent messages (default 10, max 100)",
+                "`/kufur` — Rastgele bir Türkçe küfür söyler",
+                "`/help` — Show this message",
+              ].join("\n"),
+            },
+          )
+          .setFooter({ text: "Tip: /radio with no argument seeds from whatever is currently playing." });
+
+        await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
         break;
       }
 
