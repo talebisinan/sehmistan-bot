@@ -49,7 +49,6 @@ const INITIAL_BUFFER_BYTES = 192_000 * 2;
 const PREFILL_TIMEOUT_MS = 8_000;
 const MAX_PLAY_ATTEMPTS = 2;
 
-
 export function formatDuration(seconds: number): string {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
@@ -95,13 +94,13 @@ function waitForInitialBuffer(stream: PassThrough): Promise<void> {
     const onReadable = () => {
       if (stream.readableLength >= INITIAL_BUFFER_BYTES) cleanup();
     };
-    const onErr  = () => cleanup("stream error");
+    const onErr = () => cleanup("stream error");
     const onDone = () => cleanup("stream ended before buffer was full");
 
     stream.on("readable", onReadable);
-    stream.on("error",    onErr);
-    stream.on("end",      onDone);
-    stream.on("close",    onDone);
+    stream.on("error", onErr);
+    stream.on("end", onDone);
+    stream.on("close", onDone);
   });
 }
 
@@ -145,18 +144,24 @@ export class MusicService {
     return { title: item.title, duration: item.duration, queued: 1 };
   }
 
-
   async startRadio(
     channel: VoiceBasedChannel,
     queryOrUrl: string | null,
     requestedBy: string,
-  ): Promise<{ seedTitle: string; queued: number; tracks: Array<{ url: string; title: string; duration?: string }> }> {
+  ): Promise<{
+    seedTitle: string;
+    queued: number;
+    tracks: Array<{ url: string; title: string; duration?: string }>;
+  }> {
     let seedUrl: string;
     let seedTitle: string;
 
     if (!queryOrUrl) {
       const current = this.getCurrentSong();
-      if (!current) throw new Error("Nothing is playing. Provide a song name to start the radio.");
+      if (!current)
+        throw new Error(
+          "Nothing is playing. Provide a song name to start the radio.",
+        );
       seedUrl = current.url;
       seedTitle = current.title;
     } else {
@@ -166,7 +171,10 @@ export class MusicService {
     }
 
     const videoId = this.extractVideoId(seedUrl);
-    if (!videoId) throw new Error("Could not extract a YouTube video ID to seed the radio.");
+    if (!videoId)
+      throw new Error(
+        "Could not extract a YouTube video ID to seed the radio.",
+      );
 
     const tracks = await this.fetchRadioTracks(videoId, 25);
 
@@ -174,7 +182,8 @@ export class MusicService {
     const currentUrl = this.getCurrentSong()?.url;
     const filtered = tracks.filter((t) => t.url !== currentUrl);
 
-    if (filtered.length === 0) throw new Error("Radio returned no tracks. Try a different song.");
+    if (filtered.length === 0)
+      throw new Error("Radio returned no tracks. Try a different song.");
 
     const queueItems = filtered.map((t) =>
       this.createQueueItem(t.url, t.title, t.durationSec, requestedBy),
@@ -210,7 +219,6 @@ export class MusicService {
     }
   }
 
-
   private extractVideoId(url: string): string | null {
     try {
       const parsed = new URL(url);
@@ -233,13 +241,16 @@ export class MusicService {
         "--flat-playlist",
         "--dump-json",
         "--no-warnings",
-        "--playlist-end", String(limit),
+        "--playlist-end",
+        String(limit),
         radioUrl,
       ];
       const proc = spawn("yt-dlp", args, { stdio: ["ignore", "pipe", "pipe"] });
 
       let raw = "";
-      proc.stdout!.on("data", (chunk: Buffer) => { raw += chunk.toString(); });
+      proc.stdout!.on("data", (chunk: Buffer) => {
+        raw += chunk.toString();
+      });
       proc.stderr!.on("data", (chunk: Buffer) => {
         const msg = chunk.toString();
         if (msg.trim()) console.warn("⚠️ yt-dlp radio:", msg.trim());
@@ -252,7 +263,11 @@ export class MusicService {
           .filter((l) => l.trim().startsWith("{"))
           .map((l) => {
             try {
-              const obj = JSON.parse(l) as { id?: string; title?: string; duration?: number };
+              const obj = JSON.parse(l) as {
+                id?: string;
+                title?: string;
+                duration?: number;
+              };
               if (!obj.id || !obj.title) return null;
               return {
                 url: `https://www.youtube.com/watch?v=${obj.id}`,
@@ -263,10 +278,15 @@ export class MusicService {
               return null;
             }
           })
-          .filter((t): t is { url: string; title: string; durationSec: number } => t !== null);
+          .filter(
+            (t): t is { url: string; title: string; durationSec: number } =>
+              t !== null,
+          );
 
         if (code !== 0 && tracks.length === 0) {
-          reject(new Error(`yt-dlp exited with code ${code} and returned no tracks`));
+          reject(
+            new Error(`yt-dlp exited with code ${code} and returned no tracks`),
+          );
         } else {
           resolve(tracks);
         }
@@ -283,11 +303,14 @@ export class MusicService {
     const allVideos = await playlist.all_videos();
     const videos = allVideos.slice(0, 100);
 
-    if (videos.length === 0) throw new Error("Playlist is empty or unavailable");
+    if (videos.length === 0)
+      throw new Error("Playlist is empty or unavailable");
 
     for (const v of videos) {
       if (!v.url || !v.title) continue;
-      this.queue.push(this.createQueueItem(v.url, v.title, v.durationInSec, requestedBy));
+      this.queue.push(
+        this.createQueueItem(v.url, v.title, v.durationInSec, requestedBy),
+      );
     }
 
     await this.ensurePlayback(channel);
@@ -298,17 +321,25 @@ export class MusicService {
       videos[0]!.durationInSec,
       requestedBy,
     );
-    return { title: first.title, duration: first.duration, queued: videos.length };
+    return {
+      title: first.title,
+      duration: first.duration,
+      queued: videos.length,
+    };
   }
 
   async searchTracks(query: string): Promise<SearchResult[]> {
-    const results = await search(query, { limit: 5, source: { youtube: "video" } });
+    const results = await search(query, {
+      limit: 5,
+      source: { youtube: "video" },
+    });
     return results
       .filter((v) => v.url && v.title)
       .map((v) => ({
         url: v.url,
         title: v.title ?? "Unknown",
-        duration: v.durationInSec > 0 ? formatDuration(v.durationInSec) : undefined,
+        duration:
+          v.durationInSec > 0 ? formatDuration(v.durationInSec) : undefined,
         durationSec: v.durationInSec,
         channelName: v.channel?.name,
       }));
@@ -325,19 +356,30 @@ export class MusicService {
   private async initConnection(channel: VoiceBasedChannel): Promise<void> {
     this.voiceChannel = channel;
 
+    console.log(
+      `🔊 Joining voice channel: ${channel.name} (${channel.id}) in ${channel.guild.name} (${channel.guild.id})`,
+    );
+
     const conn = joinVoiceChannel({
       channelId: channel.id,
       guildId: channel.guild.id,
       adapterCreator: channel.guild.voiceAdapterCreator,
+      selfDeaf: false,
     });
 
     try {
-      await entersState(conn, VoiceConnectionStatus.Ready, 30_000);
-      console.log("✅ Voice connection ready");
+      await entersState(conn, VoiceConnectionStatus.Ready, 45_000);
+      console.log(`✅ Voice connection ready in ${channel.name}`);
     } catch (error) {
-      console.error("❌ Failed to establish voice connection");
+      console.error(
+        `❌ Failed to establish voice connection to ${channel.name} (${channel.id}) in ${channel.guild.name} (${channel.guild.id})`,
+        error,
+      );
       conn.destroy();
-      throw error;
+      throw new Error(
+        `Could not join voice channel ${channel.name}. Check Connect/Speak permissions and whether Discord voice is reachable.`,
+        { cause: error },
+      );
     }
 
     this.connection = conn;
@@ -465,10 +507,14 @@ export class MusicService {
     const args = ["-i", "pipe:0"];
     if (seekSeconds > 0) args.push("-ss", String(seekSeconds));
     args.push(
-      "-f", "s16le",
-      "-ar", "48000",
-      "-ac", "2",
-      "-loglevel", "error",
+      "-f",
+      "s16le",
+      "-ar",
+      "48000",
+      "-ac",
+      "2",
+      "-loglevel",
+      "error",
       "pipe:1",
     );
     return args;
@@ -476,10 +522,13 @@ export class MusicService {
 
   private buildYtdlpArgs(url: string): string[] {
     const args = [
-      "-f", "bestaudio/best",
-      "-o", "-",
+      "-f",
+      "bestaudio/best",
+      "-o",
+      "-",
       "--no-playlist",
-      "--extractor-args", "youtube:player_client=android,tv_embedded",
+      "--extractor-args",
+      "youtube:player_client=android,tv_embedded",
     ];
     const cookiesBrowser = process.env.YTDLP_COOKIES_BROWSER;
     if (cookiesBrowser) args.push("--cookies-from-browser", cookiesBrowser);
@@ -499,19 +548,39 @@ export class MusicService {
     });
     const ffmpeg = spawn(
       "ffmpeg",
-      ["-i", "pipe:0", "-f", "s16le", "-ar", "48000", "-ac", "2", "-loglevel", "error", tmpPath],
+      [
+        "-i",
+        "pipe:0",
+        "-f",
+        "s16le",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+        "-loglevel",
+        "error",
+        tmpPath,
+      ],
       { stdio: ["pipe", "ignore", "pipe"] },
     );
 
     ytdlp.stdout!.pipe(ffmpeg.stdin!);
     ytdlp.stdout!.on("error", (e: NodeJS.ErrnoException) => {
-      if (e.code !== "EPIPE") console.error("❌ prefetch yt-dlp stdout error:", e);
+      if (e.code !== "EPIPE")
+        console.error("❌ prefetch yt-dlp stdout error:", e);
     });
     ffmpeg.stdin!.on("error", (e: NodeJS.ErrnoException) => {
-      if (e.code !== "EPIPE") console.error("❌ prefetch ffmpeg stdin error:", e);
+      if (e.code !== "EPIPE")
+        console.error("❌ prefetch ffmpeg stdin error:", e);
     });
 
-    const entry: PrefetchEntry = { url: item.url, path: tmpPath, ready: false, ytdlp, ffmpeg };
+    const entry: PrefetchEntry = {
+      url: item.url,
+      path: tmpPath,
+      ready: false,
+      ytdlp,
+      ffmpeg,
+    };
     this.prefetchCache.set(item.url, entry);
 
     ffmpeg.on("close", (code) => {
@@ -543,7 +612,10 @@ export class MusicService {
     }
   }
 
-  private setupProcessHandlers(ytdlp: ChildProcess, ffmpeg: ChildProcess): void {
+  private setupProcessHandlers(
+    ytdlp: ChildProcess,
+    ffmpeg: ChildProcess,
+  ): void {
     const onFatal = (name: string) => (err: Error) => {
       console.error(`❌ ${name} process error:`, err);
       this.currentSong = null;
@@ -593,14 +665,15 @@ export class MusicService {
         fileStream.on("close", cleanupFile);
         fileStream.on("error", cleanupFile);
 
-        const resource = createAudioResource(fileStream, { inputType: StreamType.Raw });
+        const resource = createAudioResource(fileStream, {
+          inputType: StreamType.Raw,
+        });
         this.currentSong = item;
         this.playAttempts.delete(item.url);
         this.player!.play(resource);
         this.isPlaying = true;
         this.isLoadingNext = false;
         console.log(`▶️  Now playing (buffered): ${item.title}`);
-
       } else {
         if (this.prefetchCache.has(item.url)) this.cancelPrefetchFor(item.url);
 
@@ -626,7 +699,8 @@ export class MusicService {
             msg.includes("Error closing file") ||
             msg.includes("Error muxing a packet") ||
             msg.includes("Error submitting a packet")
-          ) return;
+          )
+            return;
           if (msg.includes("Error") || msg.includes("error"))
             console.error("❌ ffmpeg error:", msg);
         });
@@ -649,7 +723,9 @@ export class MusicService {
           return;
         }
 
-        const resource = createAudioResource(buffer, { inputType: StreamType.Raw });
+        const resource = createAudioResource(buffer, {
+          inputType: StreamType.Raw,
+        });
         this.currentSong = item;
         this.playAttempts.delete(item.url);
         this.player!.play(resource);
@@ -667,7 +743,6 @@ export class MusicService {
       for (const next of this.queue.slice(0, 2)) {
         this.startPrefetch(next);
       }
-
     } catch (error) {
       console.error("❌ Playback error:", error);
       this.killCurrentProcesses();
@@ -675,13 +750,17 @@ export class MusicService {
 
       const attempts = (this.playAttempts.get(item.url) ?? 0) + 1;
       if (attempts < MAX_PLAY_ATTEMPTS) {
-        console.log(`🔄 Retrying "${item.title}" (attempt ${attempts + 1}/${MAX_PLAY_ATTEMPTS})`);
+        console.log(
+          `🔄 Retrying "${item.title}" (attempt ${attempts + 1}/${MAX_PLAY_ATTEMPTS})`,
+        );
         this.playAttempts.set(item.url, attempts);
         this.queue.unshift(item);
         this.isLoadingNext = false;
         setTimeout(() => this.playNext(), 2_000);
       } else {
-        console.log(`⏭️  Giving up on "${item.title}" after ${attempts} attempt(s)`);
+        console.log(
+          `⏭️  Giving up on "${item.title}" after ${attempts} attempt(s)`,
+        );
         this.playAttempts.delete(item.url);
         this.isLoadingNext = false;
         setTimeout(() => this.playNext(), 0);
@@ -723,10 +802,14 @@ export class MusicService {
     return hadAnything;
   }
 
-
   private async resolveTrack(
     searchOrUrl: string,
-  ): Promise<{ url: string; title: string; duration?: string; durationSec?: number }> {
+  ): Promise<{
+    url: string;
+    title: string;
+    duration?: string;
+    durationSec?: number;
+  }> {
     if (
       searchOrUrl.includes("youtube.com") ||
       searchOrUrl.includes("youtu.be")
@@ -736,7 +819,8 @@ export class MusicService {
         const info = await video_info(searchOrUrl);
         const title = info.video_details.title ?? "YouTube Video";
         const durationSec = info.video_details.durationInSec;
-        const duration = durationSec > 0 ? formatDuration(durationSec) : undefined;
+        const duration =
+          durationSec > 0 ? formatDuration(durationSec) : undefined;
         console.log(`✅ Found: ${title}`);
         return { url: searchOrUrl, title, duration, durationSec };
       } catch (error) {

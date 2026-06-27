@@ -1,6 +1,16 @@
-import { Client, GatewayIntentBits, REST, Routes } from "discord.js";
+import {
+  ActivityType,
+  Client,
+  GatewayIntentBits,
+  REST,
+  Routes,
+} from "discord.js";
 import { config } from "./config";
-import { commands, handleCommand, handleSelectMenu } from "./commands/CommandHandler";
+import {
+  commands,
+  handleCommand,
+  handleSelectMenu,
+} from "./commands/CommandHandler";
 
 process.on("warning", (warning) => {
   if (warning.name === "TimeoutNegativeWarning") return;
@@ -17,6 +27,20 @@ const client = new Client({
 
 client.once("clientReady", () => {
   console.log(`✅ Logged in as ${client.user?.tag}`);
+
+  client.user?.setPresence({
+    activities: [
+      {
+        name: "/help",
+        type: ActivityType.Listening,
+      },
+    ],
+    status: "online",
+  });
+
+  for (const guild of client.guilds.cache.values()) {
+    console.log(`📍 Connected to guild: ${guild.name} (${guild.id})`);
+  }
 });
 
 client.on("interactionCreate", async (interaction) => {
@@ -33,12 +57,24 @@ async function registerCommands() {
   try {
     console.log("🔄 Registering slash commands...");
 
-    await rest.put(
-      Routes.applicationGuildCommands(config.clientId, config.guildId),
-      { body: commands.map((cmd) => cmd.toJSON()) },
-    );
+    if (config.guildIds.length === 0) {
+      throw new Error(
+        "Set GUILD_IDS in your .env, e.g. GUILD_IDS=server_id_1,server_id_2",
+      );
+    }
 
-    console.log("✅ Slash commands registered!");
+    const body = commands.map((cmd) => cmd.toJSON());
+
+    for (const guildId of config.guildIds) {
+      await rest.put(
+        Routes.applicationGuildCommands(config.clientId, guildId),
+        { body },
+      );
+
+      console.log(`✅ Slash commands registered for guild ${guildId}`);
+    }
+
+    console.log("✅ Slash command registration complete!");
   } catch (error) {
     console.error("❌ Failed to register commands:", error);
   }

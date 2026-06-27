@@ -57,12 +57,12 @@ Create a `.env` file in the project root:
 ```env
 DISCORD_TOKEN=your_bot_token
 CLIENT_ID=your_application_id
-GUILD_ID=your_server_id
+GUILD_IDS=your_first_server_id,your_second_server_id
 ```
 
 - **DISCORD_TOKEN** — Bot token from the [Discord Developer Portal](https://discord.com/developers/applications)
 - **CLIENT_ID** — Application ID, found on the General Information page of your app
-- **GUILD_ID** — Your server's ID. Right-click the server name in Discord → **Copy Server ID** (requires Developer Mode: Settings → Advanced → Developer Mode)
+- **GUILD_IDS** — Comma-separated Discord server IDs where slash commands should be registered. Right-click each server name in Discord → **Copy Server ID** (requires Developer Mode: Settings → Advanced → Developer Mode). For one server, you can provide a single ID.
 
 ### YouTube session import (optional)
 

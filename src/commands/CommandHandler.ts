@@ -4,6 +4,7 @@ import {
   EmbedBuilder,
   GuildMember,
   MessageFlags,
+  PermissionsBitField,
   SlashCommandBuilder,
   StringSelectMenuBuilder,
   StringSelectMenuInteraction,
@@ -21,15 +22,60 @@ function getOrCreateService(guildId: string): MusicService {
   return musicServices.get(guildId)!;
 }
 
+async function resolveGuildMember(
+  interaction: ChatInputCommandInteraction | StringSelectMenuInteraction,
+): Promise<GuildMember | null> {
+  if (!interaction.guild) {
+    await interaction.reply({
+      content: "❌ This command can only be used in a server.",
+      flags: MessageFlags.Ephemeral,
+    });
+    return null;
+  }
+
+  return interaction.guild.members.fetch(interaction.user.id);
+}
+
 async function requireVoiceChannel(
   interaction: ChatInputCommandInteraction | StringSelectMenuInteraction,
   member: GuildMember,
 ) {
   const ch = member.voice.channel;
   if (!ch) {
-    await interaction.reply({ content: "❌ You need to be in a voice channel!", flags: MessageFlags.Ephemeral });
+    await interaction.reply({
+      content: "❌ You need to be in a voice channel!",
+      flags: MessageFlags.Ephemeral,
+    });
     return null;
   }
+
+  const me = await ch.guild.members.fetchMe();
+  const permissions = ch.permissionsFor(me);
+
+  if (!permissions?.has(PermissionsBitField.Flags.ViewChannel)) {
+    await interaction.reply({
+      content: `❌ I can't see the voice channel **${ch.name}**. Give me \`View Channel\` permission there.`,
+      flags: MessageFlags.Ephemeral,
+    });
+    return null;
+  }
+
+  if (!permissions.has(PermissionsBitField.Flags.Connect)) {
+    await interaction.reply({
+      content: `❌ I can't join **${ch.name}**. Give me \`Connect\` permission there.`,
+      flags: MessageFlags.Ephemeral,
+    });
+    return null;
+  }
+
+  if (!permissions.has(PermissionsBitField.Flags.Speak)) {
+    await interaction.reply({
+      content: `❌ I can join **${ch.name}**, but I can't speak. Give me \`Speak\` permission there.`,
+      flags: MessageFlags.Ephemeral,
+    });
+    return null;
+  }
+
   return ch;
 }
 
@@ -45,7 +91,8 @@ function isUrl(s: string): boolean {
 function parseSeekPosition(input: string): number {
   if (input.includes(":")) {
     const parts = input.split(":").map(Number);
-    if (parts.length === 3) return (parts[0] ?? 0) * 3600 + (parts[1] ?? 0) * 60 + (parts[2] ?? 0);
+    if (parts.length === 3)
+      return (parts[0] ?? 0) * 3600 + (parts[1] ?? 0) * 60 + (parts[2] ?? 0);
     if (parts.length === 2) return (parts[0] ?? 0) * 60 + (parts[1] ?? 0);
   }
   const n = parseInt(input, 10);
@@ -104,11 +151,15 @@ export const commands = [
     ),
   new SlashCommandBuilder()
     .setName("radio")
-    .setDescription("Start a YouTube radio/mix based on the current song or a query")
+    .setDescription(
+      "Start a YouTube radio/mix based on the current song or a query",
+    )
     .addStringOption((option) =>
       option
         .setName("query")
-        .setDescription("Song name or YouTube URL to seed the radio (optional — defaults to current song)")
+        .setDescription(
+          "Song name or YouTube URL to seed the radio (optional — defaults to current song)",
+        )
         .setRequired(false),
     ),
   new SlashCommandBuilder()
@@ -119,7 +170,9 @@ export const commands = [
 export async function handleCommand(
   interaction: ChatInputCommandInteraction,
 ): Promise<void> {
-  const member = interaction.member as GuildMember;
+  const member = await resolveGuildMember(interaction);
+  if (!member) return;
+
   const service = getOrCreateService(interaction.guildId!);
 
   try {
@@ -139,7 +192,10 @@ export async function handleCommand(
 
         const options = results.map((r) => ({
           label: r.title.slice(0, 100),
-          description: `${r.duration ?? "??"} • ${r.channelName ?? ""}`.slice(0, 100),
+          description: `${r.duration ?? "??"} • ${r.channelName ?? ""}`.slice(
+            0,
+            100,
+          ),
           value: r.url,
         }));
 
@@ -148,7 +204,8 @@ export async function handleCommand(
           .setPlaceholder("Pick a song...")
           .addOptions(options);
 
-        const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select);
+        const row =
+          new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select);
 
         const embed = new EmbedBuilder()
           .setColor(EMBED_COLOR)
@@ -193,15 +250,25 @@ export async function handleCommand(
                 ? "▶️ Now Playing"
                 : "➕ Added to Queue",
           )
-          .setDescription(`**${title}**${isPlaylist ? ` and ${queued - 1} more` : ""}`)
+          .setDescription(
+            `**${title}**${isPlaylist ? ` and ${queued - 1} more` : ""}`,
+          )
           .setFooter({ text: `Requested by ${requestedBy}` });
 
         if (duration && !isPlaylist) {
-          embed.addFields({ name: "⏱️ Duration", value: duration, inline: true });
+          embed.addFields({
+            name: "⏱️ Duration",
+            value: duration,
+            inline: true,
+          });
         }
 
         if (isPlaylist) {
-          embed.addFields({ name: "🎵 Songs", value: String(queued), inline: true });
+          embed.addFields({
+            name: "🎵 Songs",
+            value: String(queued),
+            inline: true,
+          });
         } else if (service.getQueueLength() > 0) {
           embed.addFields({
             name: "📝 Queue Position",
@@ -215,22 +282,26 @@ export async function handleCommand(
       }
 
       case "s": {
-        if (!await requireVoiceChannel(interaction, member)) return;
+        if (!(await requireVoiceChannel(interaction, member))) return;
 
         const skipped = service.skip();
-        await interaction.reply(skipped ? "⏭️ Skipped!" : "❌ Nothing to skip!");
+        await interaction.reply(
+          skipped ? "⏭️ Skipped!" : "❌ Nothing to skip!",
+        );
         break;
       }
 
       case "stop": {
-        if (!await requireVoiceChannel(interaction, member)) return;
+        if (!(await requireVoiceChannel(interaction, member))) return;
         const stopped = service.stop();
-        await interaction.reply(stopped ? "⏹️ Stopped and queue cleared!" : "❌ Nothing is playing!");
+        await interaction.reply(
+          stopped ? "⏹️ Stopped and queue cleared!" : "❌ Nothing is playing!",
+        );
         break;
       }
 
       case "seek": {
-        if (!await requireVoiceChannel(interaction, member)) return;
+        if (!(await requireVoiceChannel(interaction, member))) return;
 
         const input = interaction.options.getString("position", true);
         const seconds = parseSeekPosition(input);
@@ -252,7 +323,9 @@ export async function handleCommand(
           return;
         }
 
-        await interaction.reply(`⏩ Seeking to **${formatDuration(seconds)}**...`);
+        await interaction.reply(
+          `⏩ Seeking to **${formatDuration(seconds)}**...`,
+        );
         break;
       }
 
@@ -264,8 +337,15 @@ export async function handleCommand(
           ).toString("utf-8"),
         );
         const word = swears[Math.floor(Math.random() * swears.length)] ?? "...";
-        await interaction.reply({ content: word, flags: MessageFlags.Ephemeral });
-        if (interaction.channel?.isTextBased() && !interaction.channel.isThread() && "send" in interaction.channel) {
+        await interaction.reply({
+          content: word,
+          flags: MessageFlags.Ephemeral,
+        });
+        if (
+          interaction.channel?.isTextBased() &&
+          !interaction.channel.isThread() &&
+          "send" in interaction.channel
+        ) {
           await interaction.channel.send({ content: word, tts: true });
         }
         break;
@@ -283,7 +363,9 @@ export async function handleCommand(
           return;
         }
 
-        const embed = new EmbedBuilder().setColor(EMBED_COLOR).setTitle("🎵 Music Queue");
+        const embed = new EmbedBuilder()
+          .setColor(EMBED_COLOR)
+          .setTitle("🎵 Music Queue");
 
         if (currentSong) {
           const titlePart = currentSong.duration
@@ -319,13 +401,22 @@ export async function handleCommand(
         const amount = interaction.options.getInteger("amount") ?? 10;
 
         if (!interaction.channel || !("bulkDelete" in interaction.channel)) {
-          await interaction.reply({ content: "❌ Cannot delete messages in this channel.", flags: MessageFlags.Ephemeral });
+          await interaction.reply({
+            content: "❌ Cannot delete messages in this channel.",
+            flags: MessageFlags.Ephemeral,
+          });
           return;
         }
 
         const botMember = interaction.guild?.members.me;
-        if (!botMember?.permissionsIn(interaction.channel).has("ManageMessages")) {
-          await interaction.reply({ content: "❌ I need the **Manage Messages** permission in this channel.", flags: MessageFlags.Ephemeral });
+        if (
+          !botMember?.permissionsIn(interaction.channel).has("ManageMessages")
+        ) {
+          await interaction.reply({
+            content:
+              "❌ I need the **Manage Messages** permission in this channel.",
+            flags: MessageFlags.Ephemeral,
+          });
           return;
         }
 
@@ -345,17 +436,31 @@ export async function handleCommand(
             const bulk = await channel.bulkDelete(recent);
             deletedCount += bulk.size;
           } else if (recent.size === 1) {
-            try { await recent.first()!.delete(); deletedCount++; } catch (e: any) { if (e.code !== 10008) throw e; }
+            try {
+              await recent.first()!.delete();
+              deletedCount++;
+            } catch (e: any) {
+              if (e.code !== 10008) throw e;
+            }
           }
 
           for (const msg of old.values()) {
-            try { await msg.delete(); deletedCount++; } catch (e: any) { if (e.code !== 10008) throw e; }
+            try {
+              await msg.delete();
+              deletedCount++;
+            } catch (e: any) {
+              if (e.code !== 10008) throw e;
+            }
           }
 
-          await interaction.editReply({ content: `🧹 Deleted ${deletedCount} message(s).` });
+          await interaction.editReply({
+            content: `🧹 Deleted ${deletedCount} message(s).`,
+          });
           setTimeout(() => interaction.deleteReply().catch(() => {}), 3000);
         } catch (error) {
-          await interaction.editReply({ content: `❌ Error: ${error instanceof Error ? error.message : "Unknown error"}` });
+          await interaction.editReply({
+            content: `❌ Error: ${error instanceof Error ? error.message : "Unknown error"}`,
+          });
         }
         break;
       }
@@ -392,9 +497,14 @@ export async function handleCommand(
               ].join("\n"),
             },
           )
-          .setFooter({ text: "Tip: /radio with no argument seeds from whatever is currently playing." });
+          .setFooter({
+            text: "Tip: /radio with no argument seeds from whatever is currently playing.",
+          });
 
-        await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+        await interaction.reply({
+          embeds: [embed],
+          flags: MessageFlags.Ephemeral,
+        });
         break;
       }
 
@@ -407,13 +517,21 @@ export async function handleCommand(
 
         await interaction.deferReply();
 
-        const { seedTitle, queued, tracks } = await service.startRadio(voiceChannel, query, requestedBy);
+        const { seedTitle, queued, tracks } = await service.startRadio(
+          voiceChannel,
+          query,
+          requestedBy,
+        );
 
         const embed = new EmbedBuilder()
           .setColor(EMBED_COLOR)
           .setTitle("📻 Radio Started")
           .setDescription(`Seeded from **${seedTitle}**`)
-          .addFields({ name: "🎵 Songs Queued", value: String(queued), inline: true })
+          .addFields({
+            name: "🎵 Songs Queued",
+            value: String(queued),
+            inline: true,
+          })
           .setFooter({ text: `Started by ${requestedBy}` });
 
         const snapshot = tracks.slice(0, 25);
@@ -438,11 +556,11 @@ export async function handleCommand(
           .setPlaceholder("⏭️ Jump to a song…")
           .addOptions(options);
 
-        const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select);
+        const row =
+          new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select);
         await interaction.editReply({ embeds: [embed], components: [row] });
         break;
       }
-
     }
   } catch (error) {
     console.error("Command error:", error);
@@ -451,7 +569,10 @@ export async function handleCommand(
     if (interaction.deferred) {
       await interaction.editReply({ content: message });
     } else {
-      await interaction.reply({ content: message, flags: MessageFlags.Ephemeral });
+      await interaction.reply({
+        content: message,
+        flags: MessageFlags.Ephemeral,
+      });
     }
   }
 }
@@ -460,7 +581,9 @@ export async function handleSelectMenu(
   interaction: StringSelectMenuInteraction,
 ): Promise<void> {
   if (interaction.customId === "music-search") {
-    const member = interaction.member as GuildMember;
+    const member = await resolveGuildMember(interaction);
+    if (!member) return;
+
     const voiceChannel = await requireVoiceChannel(interaction, member);
     if (!voiceChannel) return;
 
@@ -473,7 +596,11 @@ export async function handleSelectMenu(
     await interaction.deferUpdate();
 
     try {
-      const { title, duration } = await service.play(voiceChannel, url, requestedBy);
+      const { title, duration } = await service.play(
+        voiceChannel,
+        url,
+        requestedBy,
+      );
       const queueLength = service.getQueueLength();
       const isNowPlaying = queueLength === 0;
 
@@ -521,7 +648,9 @@ export async function handleSelectMenu(
         embeds: [
           new EmbedBuilder()
             .setColor(EMBED_COLOR)
-            .setDescription("❌ That song is no longer in the queue — it may have already played."),
+            .setDescription(
+              "❌ That song is no longer in the queue — it may have already played.",
+            ),
         ],
         components: [],
       });
@@ -556,9 +685,13 @@ export async function handleSelectMenu(
       .setPlaceholder("⏭️ Jump to a song…")
       .addOptions(jumpOptions);
 
-    const jumpRow = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(jumpSelect);
+    const jumpRow =
+      new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(jumpSelect);
 
-    await interaction.editReply({ embeds: [successEmbed], components: [jumpRow] });
+    await interaction.editReply({
+      embeds: [successEmbed],
+      components: [jumpRow],
+    });
     return;
   }
 }
