@@ -95,7 +95,7 @@ async function requireVoiceModerationChannel(
   const memberPermissions = ch.permissionsFor(member);
   if (!memberPermissions?.has(PermissionsBitField.Flags.MoveMembers)) {
     await interaction.reply({
-      content: `❌ You need the \`Move Members\` permission in **${ch.name}** to use \`/bam\`.`,
+      content: `❌ You need the \`Move Members\` permission in **${ch.name}** to use this command.`,
       flags: MessageFlags.Ephemeral,
     });
     return null;
@@ -114,7 +114,7 @@ async function requireVoiceModerationChannel(
 
   if (!permissions.has(PermissionsBitField.Flags.MoveMembers)) {
     await interaction.reply({
-      content: `❌ I need the \`Move Members\` permission in **${ch.name}** to disconnect other apps.`,
+      content: `❌ I need the \`Move Members\` permission in **${ch.name}** to disconnect voice members.`,
       flags: MessageFlags.Ephemeral,
     });
     return null;
@@ -149,6 +149,37 @@ function formatBulletedList(items: string[], maxItems = 20): string {
     shown.push(`• ...and ${items.length - maxItems} more`);
   }
   return shown.join("\n").slice(0, 1024);
+}
+
+async function disconnectVoiceMembers(
+  targets: GuildMember[],
+  ownBotId: string,
+  service: MusicService,
+  reason: string,
+): Promise<{ disconnected: string[]; failed: string[] }> {
+  const results = await Promise.allSettled(
+    targets.map(async (target) => {
+      if (target.id === ownBotId) {
+        service.disconnect();
+      } else {
+        await target.voice.disconnect(reason);
+      }
+      return target.displayName;
+    }),
+  );
+
+  const disconnected: string[] = [];
+  const failed: string[] = [];
+
+  results.forEach((result, i) => {
+    if (result.status === "fulfilled") {
+      disconnected.push(result.value);
+    } else {
+      failed.push(targets[i]?.displayName ?? "unknown member");
+    }
+  });
+
+  return { disconnected, failed };
 }
 
 export const commands = [
@@ -204,6 +235,9 @@ export const commands = [
   new SlashCommandBuilder()
     .setName("bam")
     .setDescription("Disconnect other apps from your current voice channel"),
+  new SlashCommandBuilder()
+    .setName("bambam")
+    .setDescription("Disconnect everyone from your current voice channel"),
   new SlashCommandBuilder()
     .setName("radio")
     .setDescription(
@@ -474,24 +508,12 @@ export async function handleCommand(
 
         await interaction.deferReply();
 
-        const targetList = [...targets.values()];
-        const results = await Promise.allSettled(
-          targetList.map(async (target) => {
-            await target.voice.disconnect(`Bam by ${member.user.tag}`);
-            return target.displayName;
-          }),
+        const { disconnected, failed } = await disconnectVoiceMembers(
+          [...targets.values()],
+          me.id,
+          service,
+          `Bam by ${member.user.tag}`,
         );
-
-        const disconnected: string[] = [];
-        const failed: string[] = [];
-
-        results.forEach((result, i) => {
-          if (result.status === "fulfilled") {
-            disconnected.push(result.value);
-          } else {
-            failed.push(targetList[i]?.displayName ?? "unknown app");
-          }
-        });
 
         const embed = new EmbedBuilder()
           .setColor(EMBED_COLOR)
@@ -500,6 +522,60 @@ export async function handleCommand(
             disconnected.length > 0
               ? `Disconnected ${disconnected.length} app(s) from **${voiceChannel.name}**.`
               : `Couldn't disconnect any apps from **${voiceChannel.name}**.`,
+          );
+
+        if (disconnected.length > 0) {
+          embed.addFields({
+            name: "Disconnected",
+            value: formatBulletedList(disconnected),
+          });
+        }
+
+        if (failed.length > 0) {
+          embed.addFields({
+            name: "Failed",
+            value: formatBulletedList(failed),
+          });
+        }
+
+        await interaction.editReply({ embeds: [embed] });
+        break;
+      }
+
+      case "bambam": {
+        const voiceChannel = await requireVoiceModerationChannel(
+          interaction,
+          member,
+        );
+        if (!voiceChannel) return;
+
+        const me = await voiceChannel.guild.members.fetchMe();
+        const targetList = [...voiceChannel.members.values()];
+
+        if (targetList.length === 0) {
+          await interaction.reply({
+            content: `🤷 Nobody is connected to **${voiceChannel.name}**.`,
+            flags: MessageFlags.Ephemeral,
+          });
+          return;
+        }
+
+        await interaction.deferReply();
+
+        const { disconnected, failed } = await disconnectVoiceMembers(
+          targetList,
+          me.id,
+          service,
+          `Bambam by ${member.user.tag}`,
+        );
+
+        const embed = new EmbedBuilder()
+          .setColor(EMBED_COLOR)
+          .setTitle("💥 Bambam!")
+          .setDescription(
+            disconnected.length > 0
+              ? `Disconnected ${disconnected.length} member(s) from **${voiceChannel.name}**.`
+              : `Couldn't disconnect anyone from **${voiceChannel.name}**.`,
           );
 
         if (disconnected.length > 0) {
@@ -616,6 +692,7 @@ export async function handleCommand(
               value: [
                 "`/clean [amount]` — Bulk-delete recent messages (default 10, max 100)",
                 "`/bam` — Disconnect other apps from your current voice channel",
+                "`/bambam` — Disconnect everyone from your current voice channel",
                 "`/kufur` — Rastgele bir Türkçe küfür söyler",
                 "`/help` — Show this message",
               ].join("\n"),
