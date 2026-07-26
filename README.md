@@ -107,6 +107,12 @@ YTDLP_YOUTUBE_PLAYER_CLIENT=web
 
 If unset, `YTDLP_YOUTUBE_PLAYER_CLIENT` defaults to `android,tv_embedded`.
 
+
+```
+YTDLP_COOKIES_BROWSER=chrome:/home/sinan/.var/app/com.google.Chrome/config/google-chrome/Default
+YTDLP_JS_RUNTIMES=node
+YTDLP_YOUTUBE_PLAYER_CLIENT=default
+```
 ## Usage
 
 ```bash
