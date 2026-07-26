@@ -73,7 +73,24 @@ If a video requires sign-in, set this optional variable to let yt-dlp borrow you
 YTDLP_COOKIES_BROWSER=firefox
 ```
 
-Supported values: `firefox`, `chrome`, `chromium`, `brave`, `edge`, `safari`
+Supported values include `firefox`, `chrome`, `chromium`, `brave`, `edge`, and `safari`. You can also pass yt-dlp's full browser syntax, for example `firefox:default-release` for a specific Firefox profile.
+
+If browser cookie import does not authenticate age-restricted videos, export YouTube cookies to a Netscape-format cookies file and use that instead:
+
+```env
+YTDLP_COOKIES_FILE=/absolute/path/to/youtube-cookies.txt
+```
+
+`YTDLP_COOKIES_FILE` takes precedence over `YTDLP_COOKIES_BROWSER` when both are set. The cookies must come from a YouTube account that can watch the video in a normal browser.
+
+Optional yt-dlp tuning:
+
+```env
+YTDLP_JS_RUNTIMES=node:/absolute/path/to/node
+YTDLP_YOUTUBE_PLAYER_CLIENT=web
+```
+
+If unset, `YTDLP_YOUTUBE_PLAYER_CLIENT` defaults to `android,tv_embedded`.
 
 ## Usage
 

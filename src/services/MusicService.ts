@@ -65,10 +65,10 @@ export function formatDuration(seconds: number): string {
  * Resolves early if the stream ends/errors (yt-dlp failure fast path),
  * and always resolves after PREFILL_TIMEOUT_MS at the latest.
  */
-function waitForInitialBuffer(stream: PassThrough): Promise<void> {
-  return new Promise<void>((resolve) => {
+function waitForInitialBuffer(stream: PassThrough): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
     if (stream.readableLength >= INITIAL_BUFFER_BYTES) {
-      resolve();
+      resolve(true);
       return;
     }
 
@@ -81,14 +81,16 @@ function waitForInitialBuffer(stream: PassThrough): Promise<void> {
       stream.removeListener("error", onErr);
       stream.removeListener("end", onDone);
       stream.removeListener("close", onDone);
-      if (reason) console.warn(`⚠️  Pre-fill: ${reason}`);
-      resolve();
+
+      const hasAudio = stream.readableLength > 0;
+      if (reason) {
+        const suffix = hasAudio ? "starting with partial buffer" : "no audio buffered";
+        console.warn(`⚠️  Pre-fill: ${reason} — ${suffix}`);
+      }
+      resolve(hasAudio);
     };
 
-    const timer = setTimeout(
-      () => cleanup("timeout — starting with partial buffer"),
-      PREFILL_TIMEOUT_MS,
-    );
+    const timer = setTimeout(() => cleanup("timeout"), PREFILL_TIMEOUT_MS);
     // The readable event fires in paused mode whenever new data is pushed into
     // the internal buffer, so we check readableLength on each arrival.
     const onReadable = () => {
@@ -123,6 +125,7 @@ export class MusicService {
   private ytdlpProcess: ChildProcess | null = null;
   private ffmpegProcess: ChildProcess | null = null;
   private currentFileStream: ReturnType<typeof createReadStream> | null = null;
+  private hasLoggedYtdlpAuthConfig = false;
   /** Keyed by video URL; supports pre-fetching the next 2 songs simultaneously. */
   private prefetchCache = new Map<string, PrefetchEntry>();
   /** Tracks per-URL play attempt counts for the retry logic. */
@@ -521,6 +524,8 @@ export class MusicService {
   }
 
   private buildYtdlpArgs(url: string): string[] {
+    const youtubePlayerClient =
+      process.env.YTDLP_YOUTUBE_PLAYER_CLIENT?.trim() || "android,tv_embedded";
     const args = [
       "-f",
       "bestaudio/best",
@@ -528,10 +533,28 @@ export class MusicService {
       "-",
       "--no-playlist",
       "--extractor-args",
-      "youtube:player_client=android,tv_embedded",
+      `youtube:player_client=${youtubePlayerClient}`,
     ];
-    const cookiesBrowser = process.env.YTDLP_COOKIES_BROWSER;
-    if (cookiesBrowser) args.push("--cookies-from-browser", cookiesBrowser);
+
+    const jsRuntimes = process.env.YTDLP_JS_RUNTIMES?.trim();
+    if (jsRuntimes) args.push("--js-runtimes", jsRuntimes);
+
+    const cookiesFile = process.env.YTDLP_COOKIES_FILE?.trim();
+    const cookiesBrowser = process.env.YTDLP_COOKIES_BROWSER?.trim();
+    if (cookiesFile) {
+      args.push("--cookies", cookiesFile);
+      if (!this.hasLoggedYtdlpAuthConfig) {
+        console.log(`🍪 yt-dlp cookies file: ${cookiesFile}`);
+        this.hasLoggedYtdlpAuthConfig = true;
+      }
+    } else if (cookiesBrowser) {
+      args.push("--cookies-from-browser", cookiesBrowser);
+      if (!this.hasLoggedYtdlpAuthConfig) {
+        console.log(`🍪 yt-dlp cookies-from-browser: ${cookiesBrowser}`);
+        this.hasLoggedYtdlpAuthConfig = true;
+      }
+    }
+
     args.push(url);
     return args;
   }
@@ -687,14 +710,19 @@ export class MusicService {
         });
         this.ffmpegProcess = ffmpeg;
 
+        let ytdlpFailed = false;
         ytdlp.stderr!.on("data", (data: Buffer) => {
           const msg = data.toString();
-          if (msg.includes("ERROR")) console.error("❌ yt-dlp error:", msg);
+          if (msg.includes("ERROR")) {
+            ytdlpFailed = true;
+            console.error("❌ yt-dlp error:", msg);
+          }
         });
 
         ffmpeg.stderr!.on("data", (data: Buffer) => {
           const msg = data.toString();
           if (
+            ytdlpFailed ||
             msg.includes("Error writing trailer") ||
             msg.includes("Error closing file") ||
             msg.includes("Error muxing a packet") ||
@@ -711,7 +739,12 @@ export class MusicService {
         const buffer = new PassThrough({ highWaterMark: 10 * 1024 * 1024 });
         ffmpeg.stdout!.pipe(buffer);
 
-        await waitForInitialBuffer(buffer);
+        const hasInitialAudio = await waitForInitialBuffer(buffer);
+        if (!hasInitialAudio) {
+          throw new Error(
+            "yt-dlp/ffmpeg produced no audio. If this is an age-restricted video, check YTDLP_COOKIES_BROWSER and restart the bot.",
+          );
+        }
 
         // jumpTo() may have been called while we were buffering — abort this load
         // and let playNext() restart cleanly with the new head of queue.
