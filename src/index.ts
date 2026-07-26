@@ -9,7 +9,9 @@ import { config } from "./config";
 import {
   commands,
   handleCommand,
+  handleModalSubmit,
   handleSelectMenu,
+  handleUserSelectMenu,
 } from "./commands/CommandHandler";
 
 process.on("warning", (warning) => {
@@ -48,6 +50,10 @@ client.on("interactionCreate", async (interaction) => {
     await handleCommand(interaction);
   } else if (interaction.isStringSelectMenu()) {
     await handleSelectMenu(interaction);
+  } else if (interaction.isUserSelectMenu()) {
+    await handleUserSelectMenu(interaction);
+  } else if (interaction.isModalSubmit()) {
+    await handleModalSubmit(interaction);
   }
 });
 

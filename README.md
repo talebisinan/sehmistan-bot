@@ -13,6 +13,7 @@
 | `/q` | Show the full music queue — currently playing song (as a clickable link with duration) at the top, then up to 10 upcoming songs with durations and who queued them. | ❌ |
 | `/bam` | Disconnect other bot/app accounts from your current voice channel. Requires `Move Members` for both you and the bot. | ✅ |
 | `/bambam` | Disconnect everyone from your current voice channel, including the bot itself. Requires `Move Members` for both you and the bot. | ✅ |
+| `/takewalk <user>` | Pick someone in your current voice channel and move them through usable voice channels for 5 stops, then return them home. If there are fewer than 5 usable destination channels, the bot loops the usable channels. Requires `Move Members`; the bot also needs `Connect`. | ✅ |
 | `/kufur` | Reply with a random Turkish swear word. | ❌ |
 
 The bot automatically disconnects from the voice channel after 3 minutes of inactivity.

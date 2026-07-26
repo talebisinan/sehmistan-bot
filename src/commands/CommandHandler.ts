@@ -5,19 +5,33 @@ import {
   EmbedBuilder,
   GuildMember,
   MessageFlags,
+  ModalBuilder,
+  ModalSubmitInteraction,
   PermissionsBitField,
   SlashCommandBuilder,
   StringSelectMenuBuilder,
   StringSelectMenuInteraction,
+  TextInputBuilder,
+  TextInputStyle,
+  UserSelectMenuBuilder,
+  UserSelectMenuInteraction,
 } from "discord.js";
 import type {
   PermissionResolvable,
   VoiceBasedChannel,
   VoiceChannel,
 } from "discord.js";
+import {
+  entersState,
+  joinVoiceChannel,
+  VoiceConnectionStatus,
+} from "@discordjs/voice";
 import { MusicService, formatDuration } from "../services/MusicService";
 
 const EMBED_COLOR = 0xff0000;
+const TAKE_A_WALK_DEFAULT_STEPS = 5;
+const TAKE_A_WALK_MAX_STEPS = 10;
+const TAKE_A_WALK_STEP_DELAY_MS = 1_500;
 
 const musicServices = new Map<string, MusicService>();
 
@@ -86,7 +100,10 @@ async function requireVoiceChannel(
 }
 
 async function requireVoiceModerationChannel(
-  interaction: ChatInputCommandInteraction,
+  interaction:
+    | ChatInputCommandInteraction
+    | UserSelectMenuInteraction
+    | ModalSubmitInteraction,
   member: GuildMember,
 ) {
   const ch = member.voice.channel;
@@ -165,6 +182,38 @@ function permissionLine(
   return `${permissions?.has(permission) ? "✅" : "❌"} \`${label}\``;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseTakeAWalkCustomId(customId: string): {
+  invokerId: string;
+  channelId: string;
+  targetId?: string;
+  steps?: number;
+} | null {
+  const [prefix, invokerId, channelId, targetPart, stepsPart] =
+    customId.split(":");
+  if (prefix !== "takeawalk" || !invokerId || !channelId) return null;
+
+  return {
+    invokerId,
+    channelId,
+    targetId:
+      targetPart && targetPart !== "select" ? targetPart : undefined,
+    steps:
+      stepsPart && stepsPart !== "ask"
+        ? clampTakeAWalkSteps(stepsPart)
+        : undefined,
+  };
+}
+
+function clampTakeAWalkSteps(input: string): number {
+  const parsed = parseInt(input, 10);
+  if (Number.isNaN(parsed) || parsed < 1) return 1;
+  return Math.min(parsed, TAKE_A_WALK_MAX_STEPS);
+}
+
 function getWalkableVoiceChannels(
   originalChannel: VoiceBasedChannel,
 ): VoiceChannel[] {
@@ -180,6 +229,88 @@ function getWalkableVoiceChannels(
   }
 
   return channels.sort((a, b) => a.rawPosition - b.rawPosition);
+}
+
+async function joinTakeAWalkChannel(channel: VoiceBasedChannel): Promise<void> {
+  const connection = joinVoiceChannel({
+    channelId: channel.id,
+    guildId: channel.guild.id,
+    adapterCreator: channel.guild.voiceAdapterCreator,
+    selfDeaf: false,
+    selfMute: true,
+  });
+
+  await entersState(connection, VoiceConnectionStatus.Ready, 15_000);
+}
+
+function buildWalkCompleteEmbed(
+  target: GuildMember,
+  originalChannel: VoiceBasedChannel,
+  visited: string[],
+): EmbedBuilder {
+  return new EmbedBuilder()
+    .setColor(EMBED_COLOR)
+    .setTitle("🚶 Walk complete")
+    .setDescription(
+      `Returned **${target.displayName}** to **${originalChannel.name}**.`,
+    )
+    .addFields({
+      name: `Visited ${visited.length} stop(s)`,
+      value: formatBulletedList(visited),
+    });
+}
+
+async function takeMemberOnWalk(
+  target: GuildMember,
+  originalChannel: VoiceBasedChannel,
+  steps: number,
+  reason: string,
+): Promise<string[]> {
+  const walkChannels = getWalkableVoiceChannels(originalChannel);
+  if (walkChannels.length === 0) {
+    throw new Error("There are no other voice channels to walk through.");
+  }
+
+  const me = await originalChannel.guild.members.fetchMe();
+  const availableChannels = walkChannels.filter((channel) => {
+    const permissions = channel.permissionsFor(me);
+    return (
+      permissions?.has(PermissionsBitField.Flags.ViewChannel) &&
+      permissions.has(PermissionsBitField.Flags.Connect) &&
+      permissions.has(PermissionsBitField.Flags.MoveMembers)
+    );
+  });
+
+  if (availableChannels.length === 0) {
+    throw new Error("I can't connect to any other voice channels for the walk.");
+  }
+
+  const visited: string[] = [];
+
+  try {
+    for (let i = 0; i < steps; i++) {
+      if (!target.voice.channelId) {
+        throw new Error(
+          `${target.displayName} left voice before the walk finished.`,
+        );
+      }
+
+      const nextChannel = availableChannels[i % availableChannels.length]!;
+      await joinTakeAWalkChannel(nextChannel);
+      await target.voice.setChannel(nextChannel, reason);
+      visited.push(nextChannel.name);
+      await sleep(TAKE_A_WALK_STEP_DELAY_MS);
+    }
+  } finally {
+    await joinTakeAWalkChannel(originalChannel).catch(() => {});
+    if (target.voice.channelId) {
+      await target.voice
+        .setChannel(originalChannel, `${reason} — returning home`)
+        .catch(() => {});
+    }
+  }
+
+  return visited;
 }
 
 async function disconnectVoiceMembers(
@@ -269,6 +400,15 @@ export const commands = [
   new SlashCommandBuilder()
     .setName("bambam")
     .setDescription("Disconnect everyone from your current voice channel"),
+  new SlashCommandBuilder()
+    .setName("takewalk")
+    .setDescription("Take someone in your voice channel on a 5-stop tour")
+    .addUserOption((option) =>
+      option
+        .setName("user")
+        .setDescription("Who should take the walk? Must be in your voice channel")
+        .setRequired(true),
+    ),
   new SlashCommandBuilder()
     .setName("perms")
     .setDescription("Show required bot permissions for each command"),
@@ -630,6 +770,71 @@ export async function handleCommand(
         break;
       }
 
+      case "takewalk": {
+        const voiceChannel = await requireVoiceModerationChannel(
+          interaction,
+          member,
+        );
+        if (!voiceChannel) return;
+
+        const me = await voiceChannel.guild.members.fetchMe();
+        const permissions = voiceChannel.permissionsFor(me);
+        if (!permissions?.has(PermissionsBitField.Flags.Connect)) {
+          await interaction.reply({
+            content: `❌ I need the \`Connect\` permission in **${voiceChannel.name}** to start the walk.`,
+            flags: MessageFlags.Ephemeral,
+          });
+          return;
+        }
+
+        const walkChannels = getWalkableVoiceChannels(voiceChannel);
+        if (walkChannels.length === 0) {
+          await interaction.reply({
+            content: "❌ There are no other voice channels to walk through.",
+            flags: MessageFlags.Ephemeral,
+          });
+          return;
+        }
+
+        const selectedUser = interaction.options.getUser("user", true);
+        const target = await interaction.guild!.members.fetch(selectedUser.id);
+        if (target.id === interaction.client.user?.id) {
+          await interaction.reply({
+            content: "❌ I can't take myself on a walk. Pick someone else.",
+            flags: MessageFlags.Ephemeral,
+          });
+          return;
+        }
+
+        if (target.voice.channelId !== voiceChannel.id) {
+          await interaction.reply({
+            content: `❌ **${target.displayName}** needs to be in **${voiceChannel.name}**.`,
+            flags: MessageFlags.Ephemeral,
+          });
+          return;
+        }
+
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        service.disconnect();
+        await joinTakeAWalkChannel(voiceChannel);
+        await interaction.editReply(
+          `🚶 Taking **${target.displayName}** for a ${TAKE_A_WALK_DEFAULT_STEPS}-stop walk...`,
+        );
+
+        const visited = await takeMemberOnWalk(
+          target,
+          voiceChannel,
+          TAKE_A_WALK_DEFAULT_STEPS,
+          `Take a walk by ${interaction.user.tag}`,
+        );
+
+        await interaction.editReply({
+          content: "",
+          embeds: [buildWalkCompleteEmbed(target, voiceChannel, visited)],
+        });
+        break;
+      }
+
       case "perms": {
         const botMember = await interaction.guild!.members.fetchMe();
         const voiceChannel = member.voice.channel;
@@ -667,7 +872,7 @@ export async function handleCommand(
               });
 
               const usableCount = destinations.length - missing.length;
-              const loopNote = `/takewalk uses 5 stops and loops those ${usableCount} usable channel(s) if needed.`;
+              const loopNote = `/takewalk uses ${TAKE_A_WALK_DEFAULT_STEPS} stops and loops those ${usableCount} usable channel(s) if needed.`;
 
               if (missing.length === 0) {
                 return [
@@ -914,6 +1119,7 @@ export async function handleCommand(
                 "`/clean [amount]` — Bulk-delete recent messages (default 10, max 100)",
                 "`/bam` — Disconnect other apps from your current voice channel",
                 "`/bambam` — Disconnect everyone from your current voice channel",
+                "`/takewalk <user>` — Take someone in your voice channel on a 5-stop tour",
                 "`/perms` — Show required permissions for bot commands",
                 "`/kufur` — Rastgele bir Türkçe küfür söyler",
                 "`/help` — Show this message",
@@ -1116,5 +1322,219 @@ export async function handleSelectMenu(
       components: [jumpRow],
     });
     return;
+  }
+}
+
+export async function handleUserSelectMenu(
+  interaction: UserSelectMenuInteraction,
+): Promise<void> {
+  const parsed = parseTakeAWalkCustomId(interaction.customId);
+  if (!parsed) return;
+
+  try {
+    if (interaction.user.id !== parsed.invokerId) {
+      await interaction.reply({
+        content: "❌ This walk is not yours to start.",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    if (!interaction.guild) {
+      await interaction.reply({
+        content: "❌ This can only be used in a server.",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    const targetId = interaction.values[0];
+    if (!targetId) return;
+
+    const originalChannel = interaction.guild.channels.cache.get(
+      parsed.channelId,
+    );
+    if (originalChannel?.type !== ChannelType.GuildVoice) {
+      await interaction.reply({
+        content: "❌ The original voice channel is gone.",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    const target = await interaction.guild.members.fetch(targetId);
+    if (target.id === interaction.client.user?.id) {
+      await interaction.reply({
+        content: "❌ I can't take myself on a walk. Pick someone else.",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    if (target.voice.channelId !== originalChannel.id) {
+      await interaction.reply({
+        content: `❌ **${target.displayName}** needs to be in **${originalChannel.name}**.`,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    if (parsed.steps) {
+      await interaction.deferUpdate();
+      await interaction.editReply({
+        content: `🚶 Taking **${target.displayName}** for a ${parsed.steps}-stop walk...`,
+        components: [],
+      });
+
+      const visited = await takeMemberOnWalk(
+        target,
+        originalChannel,
+        parsed.steps,
+        `Take a walk by ${interaction.user.tag}`,
+      );
+
+      await interaction.editReply({
+        content: "",
+        embeds: [buildWalkCompleteEmbed(target, originalChannel, visited)],
+        components: [],
+      });
+      return;
+    }
+
+    const modal = new ModalBuilder()
+      .setCustomId(
+        `takeawalk:${parsed.invokerId}:${originalChannel.id}:${target.id}`,
+      )
+      .setTitle("Take a walk");
+    const stepsInput = new TextInputBuilder()
+      .setCustomId("steps")
+      .setLabel(`How many stops? Max ${TAKE_A_WALK_MAX_STEPS}`)
+      .setPlaceholder("Example: 5")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setMinLength(1)
+      .setMaxLength(2);
+    const row =
+      new ActionRowBuilder<TextInputBuilder>().addComponents(stepsInput);
+
+    await interaction.showModal(modal.addComponents(row));
+  } catch (error) {
+    console.error("Take a walk user select error:", error);
+    const message = `❌ Error: ${error instanceof Error ? error.message : "Unknown error"}`;
+
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply({ content: message, components: [] });
+    } else {
+      await interaction.reply({
+        content: message,
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+  }
+}
+
+export async function handleModalSubmit(
+  interaction: ModalSubmitInteraction,
+): Promise<void> {
+  const parsed = parseTakeAWalkCustomId(interaction.customId);
+  if (!parsed?.targetId) return;
+
+  if (interaction.user.id !== parsed.invokerId) {
+    await interaction.reply({
+      content: "❌ This walk is not yours to start.",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (!interaction.guild) {
+    await interaction.reply({
+      content: "❌ This can only be used in a server.",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  try {
+    const originalChannel = interaction.guild.channels.cache.get(parsed.channelId);
+    if (originalChannel?.type !== ChannelType.GuildVoice) {
+      await interaction.editReply("❌ The original voice channel is gone.");
+      return;
+    }
+
+    const invoker = await interaction.guild.members.fetch(parsed.invokerId);
+    if (invoker.voice.channelId !== originalChannel.id) {
+      await interaction.editReply(
+        `❌ You need to stay in **${originalChannel.name}** to start the walk.`,
+      );
+      return;
+    }
+
+    const invokerPermissions = originalChannel.permissionsFor(invoker);
+    if (!invokerPermissions?.has(PermissionsBitField.Flags.MoveMembers)) {
+      await interaction.editReply(
+        `❌ You need the \`Move Members\` permission in **${originalChannel.name}** to start the walk.`,
+      );
+      return;
+    }
+
+    const me = await interaction.guild.members.fetchMe();
+    const botPermissions = originalChannel.permissionsFor(me);
+    if (!botPermissions?.has(PermissionsBitField.Flags.ViewChannel)) {
+      await interaction.editReply(
+        `❌ I can't see **${originalChannel.name}**. Give me \`View Channel\` permission there.`,
+      );
+      return;
+    }
+    if (!botPermissions.has(PermissionsBitField.Flags.Connect)) {
+      await interaction.editReply(
+        `❌ I need the \`Connect\` permission in **${originalChannel.name}** to start the walk.`,
+      );
+      return;
+    }
+    if (!botPermissions.has(PermissionsBitField.Flags.MoveMembers)) {
+      await interaction.editReply(
+        `❌ I need the \`Move Members\` permission in **${originalChannel.name}** to start the walk.`,
+      );
+      return;
+    }
+
+    const target = await interaction.guild.members.fetch(parsed.targetId);
+    if (target.voice.channelId !== originalChannel.id) {
+      await interaction.editReply(
+        `❌ **${target.displayName}** needs to still be in **${originalChannel.name}**.`,
+      );
+      return;
+    }
+
+    const steps = clampTakeAWalkSteps(
+      interaction.fields.getTextInputValue("steps"),
+    );
+
+    await interaction.editReply(
+      `🚶 Taking **${target.displayName}** for a ${steps}-stop walk...`,
+    );
+
+    const service = getOrCreateService(interaction.guildId!);
+    service.disconnect();
+
+    const visited = await takeMemberOnWalk(
+      target,
+      originalChannel,
+      steps,
+      `Take a walk by ${interaction.user.tag}`,
+    );
+
+    await interaction.editReply({
+      content: "",
+      embeds: [buildWalkCompleteEmbed(target, originalChannel, visited)],
+    });
+  } catch (error) {
+    console.error("Take a walk error:", error);
+    await interaction.editReply(
+      `❌ Error: ${error instanceof Error ? error.message : "Unknown error"}`,
+    );
   }
 }
