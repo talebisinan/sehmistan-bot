@@ -29,6 +29,10 @@ import {
 import { MusicService, formatDuration } from "../services/MusicService";
 
 const EMBED_COLOR = 0xff0000;
+const BAM_GIF_URL =
+  "https://media4.giphy.com/media/v1.Y2lkPTc5MGI3NjExaWs0Nmp2N2pkdWE5amF0azh1azFoeG5jbzd6Mzl1aDA3ZzFseXR4ZSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/lFTcr38ESKI3C/giphy.gif";
+const BAMBAM_GIF_URL =
+  "https://media1.giphy.com/media/v1.Y2lkPTc5MGI3NjExODc2MTV3YmUwNXZicDlsc3ZuamthM3ZsbmFmYnQxbmpheTVreXBjZiZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/L0snCScL0LMBor5sE0/giphy.gif";
 const TAKE_A_WALK_DEFAULT_STEPS = 5;
 const TAKE_A_WALK_MAX_STEPS = 10;
 const TAKE_A_WALK_STEP_DELAY_MS = 1_500;
@@ -695,6 +699,7 @@ export async function handleCommand(
         const embed = new EmbedBuilder()
           .setColor(EMBED_COLOR)
           .setTitle("💥 Bam!")
+          .setImage(BAM_GIF_URL)
           .setDescription(
             disconnected.length > 0
               ? `Disconnected ${disconnected.length} app(s) from **${voiceChannel.name}**.`
@@ -749,6 +754,7 @@ export async function handleCommand(
         const embed = new EmbedBuilder()
           .setColor(EMBED_COLOR)
           .setTitle("💥 Bambam!")
+          .setImage(BAMBAM_GIF_URL)
           .setDescription(
             disconnected.length > 0
               ? `Disconnected ${disconnected.length} member(s) from **${voiceChannel.name}**.`
