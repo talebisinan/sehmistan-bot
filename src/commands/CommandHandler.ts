@@ -79,6 +79,50 @@ async function requireVoiceChannel(
   return ch;
 }
 
+async function requireVoiceModerationChannel(
+  interaction: ChatInputCommandInteraction,
+  member: GuildMember,
+) {
+  const ch = member.voice.channel;
+  if (!ch) {
+    await interaction.reply({
+      content: "❌ You need to be in a voice channel!",
+      flags: MessageFlags.Ephemeral,
+    });
+    return null;
+  }
+
+  const memberPermissions = ch.permissionsFor(member);
+  if (!memberPermissions?.has(PermissionsBitField.Flags.MoveMembers)) {
+    await interaction.reply({
+      content: `❌ You need the \`Move Members\` permission in **${ch.name}** to use \`/bam\`.`,
+      flags: MessageFlags.Ephemeral,
+    });
+    return null;
+  }
+
+  const me = await ch.guild.members.fetchMe();
+  const permissions = ch.permissionsFor(me);
+
+  if (!permissions?.has(PermissionsBitField.Flags.ViewChannel)) {
+    await interaction.reply({
+      content: `❌ I can't see the voice channel **${ch.name}**. Give me \`View Channel\` permission there.`,
+      flags: MessageFlags.Ephemeral,
+    });
+    return null;
+  }
+
+  if (!permissions.has(PermissionsBitField.Flags.MoveMembers)) {
+    await interaction.reply({
+      content: `❌ I need the \`Move Members\` permission in **${ch.name}** to disconnect other apps.`,
+      flags: MessageFlags.Ephemeral,
+    });
+    return null;
+  }
+
+  return ch;
+}
+
 function isUrl(s: string): boolean {
   try {
     new URL(s);
@@ -97,6 +141,14 @@ function parseSeekPosition(input: string): number {
   }
   const n = parseInt(input, 10);
   return isNaN(n) ? -1 : n;
+}
+
+function formatBulletedList(items: string[], maxItems = 20): string {
+  const shown = items.slice(0, maxItems).map((name) => `• ${name}`);
+  if (items.length > maxItems) {
+    shown.push(`• ...and ${items.length - maxItems} more`);
+  }
+  return shown.join("\n").slice(0, 1024);
 }
 
 export const commands = [
@@ -149,6 +201,9 @@ export const commands = [
         .setMinValue(1)
         .setMaxValue(100),
     ),
+  new SlashCommandBuilder()
+    .setName("bam")
+    .setDescription("Disconnect other apps from your current voice channel"),
   new SlashCommandBuilder()
     .setName("radio")
     .setDescription(
@@ -397,6 +452,74 @@ export async function handleCommand(
         break;
       }
 
+      case "bam": {
+        const voiceChannel = await requireVoiceModerationChannel(
+          interaction,
+          member,
+        );
+        if (!voiceChannel) return;
+
+        const me = await voiceChannel.guild.members.fetchMe();
+        const targets = voiceChannel.members.filter(
+          (voiceMember) => voiceMember.user.bot && voiceMember.id !== me.id,
+        );
+
+        if (targets.size === 0) {
+          await interaction.reply({
+            content: `🤷 No other apps are connected to **${voiceChannel.name}**.`,
+            flags: MessageFlags.Ephemeral,
+          });
+          return;
+        }
+
+        await interaction.deferReply();
+
+        const targetList = [...targets.values()];
+        const results = await Promise.allSettled(
+          targetList.map(async (target) => {
+            await target.voice.disconnect(`Bam by ${member.user.tag}`);
+            return target.displayName;
+          }),
+        );
+
+        const disconnected: string[] = [];
+        const failed: string[] = [];
+
+        results.forEach((result, i) => {
+          if (result.status === "fulfilled") {
+            disconnected.push(result.value);
+          } else {
+            failed.push(targetList[i]?.displayName ?? "unknown app");
+          }
+        });
+
+        const embed = new EmbedBuilder()
+          .setColor(EMBED_COLOR)
+          .setTitle("💥 Bam!")
+          .setDescription(
+            disconnected.length > 0
+              ? `Disconnected ${disconnected.length} app(s) from **${voiceChannel.name}**.`
+              : `Couldn't disconnect any apps from **${voiceChannel.name}**.`,
+          );
+
+        if (disconnected.length > 0) {
+          embed.addFields({
+            name: "Disconnected",
+            value: formatBulletedList(disconnected),
+          });
+        }
+
+        if (failed.length > 0) {
+          embed.addFields({
+            name: "Failed",
+            value: formatBulletedList(failed),
+          });
+        }
+
+        await interaction.editReply({ embeds: [embed] });
+        break;
+      }
+
       case "clean": {
         const amount = interaction.options.getInteger("amount") ?? 10;
 
@@ -492,6 +615,7 @@ export async function handleCommand(
               name: "🧹 Utility",
               value: [
                 "`/clean [amount]` — Bulk-delete recent messages (default 10, max 100)",
+                "`/bam` — Disconnect other apps from your current voice channel",
                 "`/kufur` — Rastgele bir Türkçe küfür söyler",
                 "`/help` — Show this message",
               ].join("\n"),

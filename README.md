@@ -11,6 +11,7 @@
 | `/s` | Skip the currently playing song. | ✅ |
 | `/seek <position>` | Seek to a position in the current song. Accepts `mm:ss` (e.g. `1:30`) or seconds (e.g. `90`). | ✅ |
 | `/q` | Show the full music queue — currently playing song (as a clickable link with duration) at the top, then up to 10 upcoming songs with durations and who queued them. | ❌ |
+| `/bam` | Disconnect other bot/app accounts from your current voice channel. Requires `Move Members` for both you and the bot. | ✅ |
 | `/kufur` | Reply with a random Turkish swear word. | ❌ |
 
 The bot automatically disconnects from the voice channel after 3 minutes of inactivity.
