@@ -48,6 +48,29 @@ type PrefetchEntry = {
 const INITIAL_BUFFER_BYTES = 192_000 * 2;
 const PREFILL_TIMEOUT_MS = 8_000;
 const MAX_PLAY_ATTEMPTS = 2;
+const YTDLP_SEARCH_TIMEOUT_MS = 30_000;
+
+type ResolvedTrack = {
+  url: string;
+  title: string;
+  duration?: string;
+  durationSec?: number;
+};
+
+type YtdlpSearchEntry = {
+  id?: unknown;
+  url?: unknown;
+  title?: unknown;
+  duration?: unknown;
+};
+
+type YtdlpSearchResponse = {
+  entries?: unknown;
+  id?: unknown;
+  url?: unknown;
+  title?: unknown;
+  duration?: unknown;
+};
 
 export function formatDuration(seconds: number): string {
   const h = Math.floor(seconds / 3600);
@@ -523,18 +546,13 @@ export class MusicService {
     return args;
   }
 
-  private buildYtdlpArgs(url: string): string[] {
+  private addYtdlpSharedArgs(args: string[]): void {
     const youtubePlayerClient =
       process.env.YTDLP_YOUTUBE_PLAYER_CLIENT?.trim() || "android,tv_embedded";
-    const args = [
-      "-f",
-      "bestaudio/best",
-      "-o",
-      "-",
-      "--no-playlist",
+    args.push(
       "--extractor-args",
       `youtube:player_client=${youtubePlayerClient}`,
-    ];
+    );
 
     const jsRuntimes = process.env.YTDLP_JS_RUNTIMES?.trim();
     if (jsRuntimes) args.push("--js-runtimes", jsRuntimes);
@@ -554,9 +572,120 @@ export class MusicService {
         this.hasLoggedYtdlpAuthConfig = true;
       }
     }
+  }
 
+  private buildYtdlpArgs(url: string): string[] {
+    const args = ["-f", "bestaudio/best", "-o", "-", "--no-playlist"];
+    this.addYtdlpSharedArgs(args);
     args.push(url);
     return args;
+  }
+
+  private buildYtdlpSearchArgs(query: string): string[] {
+    const args = [
+      "--dump-single-json",
+      "--flat-playlist",
+      "--skip-download",
+      "--no-playlist",
+      "--default-search",
+      "ytsearch1",
+    ];
+    this.addYtdlpSharedArgs(args);
+    args.push(query);
+    return args;
+  }
+
+  private searchTrackWithYtdlp(query: string): Promise<ResolvedTrack> {
+    return new Promise((resolve, reject) => {
+      const proc = spawn("yt-dlp", this.buildYtdlpSearchArgs(query), {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stdout = "";
+      let stderr = "";
+      let settled = false;
+
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        proc.kill("SIGKILL");
+        reject(new Error("yt-dlp search timed out"));
+      }, YTDLP_SEARCH_TIMEOUT_MS);
+
+      proc.stdout?.on("data", (chunk) => {
+        stdout += chunk.toString();
+      });
+      proc.stderr?.on("data", (chunk) => {
+        stderr += chunk.toString();
+      });
+
+      proc.on("error", (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      });
+
+      proc.on("close", (code) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+
+        if (code !== 0) {
+          reject(
+            new Error(
+              `yt-dlp search failed (${code}): ${stderr.trim() || "no stderr"}`,
+            ),
+          );
+          return;
+        }
+
+        try {
+          resolve(this.parseYtdlpSearchResult(stdout));
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+  }
+
+  private parseYtdlpSearchResult(stdout: string): ResolvedTrack {
+    const parsed = JSON.parse(stdout) as YtdlpSearchResponse;
+    const entries = Array.isArray(parsed.entries) ? parsed.entries : [];
+    const entry = (entries[0] ?? parsed) as YtdlpSearchEntry;
+
+    const rawId = typeof entry.id === "string" ? entry.id : undefined;
+    const rawUrl = typeof entry.url === "string" ? entry.url : undefined;
+    const url = this.normalizeYtdlpVideoUrl(rawUrl, rawId);
+    if (!url) throw new Error("yt-dlp search returned no usable video URL");
+
+    const durationSec =
+      typeof entry.duration === "number" && Number.isFinite(entry.duration)
+        ? Math.max(0, Math.floor(entry.duration))
+        : 0;
+    const duration = durationSec > 0 ? formatDuration(durationSec) : undefined;
+
+    return {
+      url,
+      title: typeof entry.title === "string" ? entry.title : "Unknown",
+      duration,
+      durationSec,
+    };
+  }
+
+  private normalizeYtdlpVideoUrl(
+    rawUrl: string | undefined,
+    rawId: string | undefined,
+  ): string | null {
+    if (rawUrl?.startsWith("http://") || rawUrl?.startsWith("https://")) {
+      return rawUrl;
+    }
+
+    if (rawUrl?.startsWith("/watch")) {
+      return `https://www.youtube.com${rawUrl}`;
+    }
+
+    const id = rawId ?? rawUrl;
+    return id ? `https://www.youtube.com/watch?v=${id}` : null;
   }
 
   private startPrefetch(item: QueueItem): void {
@@ -835,14 +964,7 @@ export class MusicService {
     return hadAnything;
   }
 
-  private async resolveTrack(
-    searchOrUrl: string,
-  ): Promise<{
-    url: string;
-    title: string;
-    duration?: string;
-    durationSec?: number;
-  }> {
+  private async resolveTrack(searchOrUrl: string): Promise<ResolvedTrack> {
     if (
       searchOrUrl.includes("youtube.com") ||
       searchOrUrl.includes("youtu.be")
@@ -863,30 +985,35 @@ export class MusicService {
     }
 
     console.log(`🔍 Searching for: ${searchOrUrl}`);
-    const searchResults = await search(searchOrUrl, {
-      limit: 1,
-      source: { youtube: "video" },
-    });
+    try {
+      const searchResults = await search(searchOrUrl, {
+        limit: 1,
+        source: { youtube: "video" },
+      });
 
-    if (searchResults.length === 0) {
-      throw new Error("No results found");
+      const video = searchResults[0];
+      if (video?.url) {
+        console.log(`✅ Found: ${video.title}`);
+        const durationSec = video.durationInSec;
+        const duration =
+          durationSec > 0 ? formatDuration(durationSec) : undefined;
+
+        return {
+          url: video.url,
+          title: video.title ?? "Unknown",
+          duration,
+          durationSec,
+        };
+      }
+
+      console.warn("⚠️ play-dl search returned no usable results; falling back to yt-dlp");
+    } catch (error) {
+      console.warn("⚠️ play-dl search failed; falling back to yt-dlp:", error);
     }
 
-    const video = searchResults[0];
-    if (!video || !video.url) {
-      throw new Error("Invalid video result");
-    }
-
-    console.log(`✅ Found: ${video.title}`);
-    const durationSec = video.durationInSec;
-    const duration = durationSec > 0 ? formatDuration(durationSec) : undefined;
-
-    return {
-      url: video.url,
-      title: video.title ?? "Unknown",
-      duration,
-      durationSec,
-    };
+    const track = await this.searchTrackWithYtdlp(searchOrUrl);
+    console.log(`✅ Found via yt-dlp: ${track.title}`);
+    return track;
   }
 
   getCurrentSong(): QueueItem | null {
