@@ -410,6 +410,9 @@ export const commands = [
         .setRequired(true),
     ),
   new SlashCommandBuilder()
+    .setName("lottery")
+    .setDescription("Pick a random person from your current voice channel"),
+  new SlashCommandBuilder()
     .setName("perms")
     .setDescription("Show required bot permissions for each command"),
   new SlashCommandBuilder()
@@ -835,6 +838,47 @@ export async function handleCommand(
         break;
       }
 
+      case "lottery": {
+        const voiceChannel = member.voice.channel;
+        if (!voiceChannel) {
+          await interaction.reply({
+            content: "❌ You need to be in a voice channel!",
+            flags: MessageFlags.Ephemeral,
+          });
+          return;
+        }
+
+        const candidates = [...voiceChannel.members.values()].filter(
+          (voiceMember) => !voiceMember.user.bot,
+        );
+
+        if (candidates.length === 0) {
+          await interaction.reply({
+            content: `❌ No people found in **${voiceChannel.name}**.`,
+            flags: MessageFlags.Ephemeral,
+          });
+          return;
+        }
+
+        const winner = candidates[Math.floor(Math.random() * candidates.length)]!;
+        const embed = new EmbedBuilder()
+          .setColor(EMBED_COLOR)
+          .setTitle("🎲 Voice Lottery")
+          .setDescription(`Winner: ${winner}`)
+          .addFields({
+            name: "Channel",
+            value: voiceChannel.name,
+            inline: true,
+          }, {
+            name: "Participants",
+            value: String(candidates.length),
+            inline: true,
+          });
+
+        await interaction.reply({ embeds: [embed] });
+        break;
+      }
+
       case "perms": {
         const botMember = await interaction.guild!.members.fetchMe();
         const voiceChannel = member.voice.channel;
@@ -1120,6 +1164,7 @@ export async function handleCommand(
                 "`/bam` — Disconnect other apps from your current voice channel",
                 "`/bambam` — Disconnect everyone from your current voice channel",
                 "`/takewalk <user>` — Take someone in your voice channel on a 5-stop tour",
+                "`/lottery` — Pick a random person from your current voice channel",
                 "`/perms` — Show required permissions for bot commands",
                 "`/kufur` — Rastgele bir Türkçe küfür söyler",
                 "`/help` — Show this message",
