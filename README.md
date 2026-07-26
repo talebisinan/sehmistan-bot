@@ -17,6 +17,18 @@
 
 The bot automatically disconnects from the voice channel after 3 minutes of inactivity.
 
+## Permissions
+
+Use `/perms` in Discord to show this list from the bot. It also checks the current text channel and your current voice channel, marking permissions as present (`✅`) or missing (`❌`).
+
+| Feature / commands | Caller needs | Bot needs |
+|---|---|---|
+| Music: `/p`, `/pl`, `/radio`, `/s`, `/stop`, `/seek` | Be in a voice channel | `View Channel`, `Connect`, `Speak` in the voice channel. `Use Voice Activity` is recommended. |
+| Voice moderation: `/bam`, `/bambam` | `Move Members` in the voice channel | `View Channel`, `Move Members` in the voice channel. Bot role must be high enough to move/disconnect targets. |
+| Walk: `/takewalk` | `Move Members` in the original voice channel | `View Channel`, `Connect`, `Move Members` in the original and destination voice channels. The command uses 5 stops and loops usable destination channels if needed. This stops current music playback before moving the bot. |
+| Cleanup: `/clean` | — | `Manage Messages` in the text channel. |
+| General slash command usage | — | `Use Application Commands`, `Send Messages`, `Embed Links`, `Read Message History`. |
+
 ## Playback
 
 Audio is streamed via `yt-dlp` → `ffmpeg` → Discord with two layers of buffering to prevent interruptions:

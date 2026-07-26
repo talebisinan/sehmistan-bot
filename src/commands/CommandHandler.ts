@@ -1,5 +1,6 @@
 import {
   ActionRowBuilder,
+  ChannelType,
   ChatInputCommandInteraction,
   EmbedBuilder,
   GuildMember,
@@ -8,6 +9,11 @@ import {
   SlashCommandBuilder,
   StringSelectMenuBuilder,
   StringSelectMenuInteraction,
+} from "discord.js";
+import type {
+  PermissionResolvable,
+  VoiceBasedChannel,
+  VoiceChannel,
 } from "discord.js";
 import { MusicService, formatDuration } from "../services/MusicService";
 
@@ -151,6 +157,31 @@ function formatBulletedList(items: string[], maxItems = 20): string {
   return shown.join("\n").slice(0, 1024);
 }
 
+function permissionLine(
+  permissions: Readonly<PermissionsBitField> | null | undefined,
+  permission: PermissionResolvable,
+  label: string,
+): string {
+  return `${permissions?.has(permission) ? "✅" : "❌"} \`${label}\``;
+}
+
+function getWalkableVoiceChannels(
+  originalChannel: VoiceBasedChannel,
+): VoiceChannel[] {
+  const channels: VoiceChannel[] = [];
+
+  for (const channel of originalChannel.guild.channels.cache.values()) {
+    if (
+      channel.type === ChannelType.GuildVoice &&
+      channel.id !== originalChannel.id
+    ) {
+      channels.push(channel);
+    }
+  }
+
+  return channels.sort((a, b) => a.rawPosition - b.rawPosition);
+}
+
 async function disconnectVoiceMembers(
   targets: GuildMember[],
   ownBotId: string,
@@ -238,6 +269,9 @@ export const commands = [
   new SlashCommandBuilder()
     .setName("bambam")
     .setDescription("Disconnect everyone from your current voice channel"),
+  new SlashCommandBuilder()
+    .setName("perms")
+    .setDescription("Show required bot permissions for each command"),
   new SlashCommandBuilder()
     .setName("radio")
     .setDescription(
@@ -596,6 +630,193 @@ export async function handleCommand(
         break;
       }
 
+      case "perms": {
+        const botMember = await interaction.guild!.members.fetchMe();
+        const voiceChannel = member.voice.channel;
+        const currentChannel = interaction.guild!.channels.cache.get(
+          interaction.channelId,
+        );
+        const textPermissions = currentChannel
+          ? currentChannel.permissionsFor(botMember)
+          : null;
+        const voicePermissions = voiceChannel
+          ? voiceChannel.permissionsFor(botMember)
+          : null;
+        const callerVoicePermissions = voiceChannel
+          ? voiceChannel.permissionsFor(member)
+          : null;
+
+        const voiceContext = voiceChannel
+          ? `Checking voice channel: **${voiceChannel.name}**`
+          : "Join a voice channel to check voice-command permissions here.";
+
+        const walkDestinationLines = voiceChannel
+          ? (() => {
+              const destinations = getWalkableVoiceChannels(voiceChannel);
+              if (destinations.length === 0) {
+                return ["❌ No other voice channels found for `/takewalk`."];
+              }
+
+              const missing = destinations.filter((channel) => {
+                const permissions = channel.permissionsFor(botMember);
+                return !(
+                  permissions?.has(PermissionsBitField.Flags.ViewChannel) &&
+                  permissions.has(PermissionsBitField.Flags.Connect) &&
+                  permissions.has(PermissionsBitField.Flags.MoveMembers)
+                );
+              });
+
+              const usableCount = destinations.length - missing.length;
+              const loopNote = `/takewalk uses 5 stops and loops those ${usableCount} usable channel(s) if needed.`;
+
+              if (missing.length === 0) {
+                return [
+                  `✅ Destination channels: ${usableCount}/${destinations.length} usable`,
+                  loopNote,
+                ];
+              }
+
+              return [
+                `❌ Destination channels: ${usableCount}/${destinations.length} usable`,
+                loopNote,
+                `Missing in: ${missing
+                  .slice(0, 5)
+                  .map((channel) => `**${channel.name}**`)
+                  .join(", ")}${missing.length > 5 ? `, and ${missing.length - 5} more` : ""}`,
+              ];
+            })()
+          : ["➖ Destination channels: join voice first to check."];
+
+        const embed = new EmbedBuilder()
+          .setColor(EMBED_COLOR)
+          .setTitle("🔐 Permission Check")
+          .setDescription(voiceContext)
+          .addFields(
+            {
+              name: "💬 General / text channel",
+              value: [
+                permissionLine(
+                  textPermissions,
+                  PermissionsBitField.Flags.UseApplicationCommands,
+                  "Use Application Commands",
+                ),
+                permissionLine(
+                  textPermissions,
+                  PermissionsBitField.Flags.SendMessages,
+                  "Send Messages",
+                ),
+                permissionLine(
+                  textPermissions,
+                  PermissionsBitField.Flags.EmbedLinks,
+                  "Embed Links",
+                ),
+                permissionLine(
+                  textPermissions,
+                  PermissionsBitField.Flags.ReadMessageHistory,
+                  "Read Message History",
+                ),
+                permissionLine(
+                  textPermissions,
+                  PermissionsBitField.Flags.ManageMessages,
+                  "Manage Messages for /clean",
+                ),
+              ].join("\n"),
+            },
+            {
+              name: "🎶 Music commands",
+              value: voiceChannel
+                ? [
+                    "Commands: `/p`, `/pl`, `/radio`, `/s`, `/stop`, `/seek`",
+                    permissionLine(
+                      voicePermissions,
+                      PermissionsBitField.Flags.ViewChannel,
+                      "View Channel",
+                    ),
+                    permissionLine(
+                      voicePermissions,
+                      PermissionsBitField.Flags.Connect,
+                      "Connect",
+                    ),
+                    permissionLine(
+                      voicePermissions,
+                      PermissionsBitField.Flags.Speak,
+                      "Speak",
+                    ),
+                    permissionLine(
+                      voicePermissions,
+                      PermissionsBitField.Flags.UseVAD,
+                      "Use Voice Activity recommended",
+                    ),
+                  ].join("\n")
+                : "➖ Join a voice channel to check.",
+            },
+            {
+              name: "💥 /bam and /bambam",
+              value: voiceChannel
+                ? [
+                    "Caller:",
+                    permissionLine(
+                      callerVoicePermissions,
+                      PermissionsBitField.Flags.MoveMembers,
+                      "Move Members",
+                    ),
+                    "Bot:",
+                    permissionLine(
+                      voicePermissions,
+                      PermissionsBitField.Flags.ViewChannel,
+                      "View Channel",
+                    ),
+                    permissionLine(
+                      voicePermissions,
+                      PermissionsBitField.Flags.MoveMembers,
+                      "Move Members",
+                    ),
+                    "Role hierarchy still matters for moving/disconnecting targets.",
+                  ].join("\n")
+                : "➖ Join a voice channel to check.",
+            },
+            {
+              name: "🚶 /takewalk",
+              value: voiceChannel
+                ? [
+                    "Caller:",
+                    permissionLine(
+                      callerVoicePermissions,
+                      PermissionsBitField.Flags.MoveMembers,
+                      "Move Members",
+                    ),
+                    "Bot in original channel:",
+                    permissionLine(
+                      voicePermissions,
+                      PermissionsBitField.Flags.ViewChannel,
+                      "View Channel",
+                    ),
+                    permissionLine(
+                      voicePermissions,
+                      PermissionsBitField.Flags.Connect,
+                      "Connect",
+                    ),
+                    permissionLine(
+                      voicePermissions,
+                      PermissionsBitField.Flags.MoveMembers,
+                      "Move Members",
+                    ),
+                    ...walkDestinationLines,
+                  ].join("\n")
+                : "➖ Join a voice channel to check.",
+            },
+          )
+          .setFooter({
+            text: "✅ present • ❌ missing • ➖ not checked in this context",
+          });
+
+        await interaction.reply({
+          embeds: [embed],
+          flags: MessageFlags.Ephemeral,
+        });
+        break;
+      }
+
       case "clean": {
         const amount = interaction.options.getInteger("amount") ?? 10;
 
@@ -693,6 +914,7 @@ export async function handleCommand(
                 "`/clean [amount]` — Bulk-delete recent messages (default 10, max 100)",
                 "`/bam` — Disconnect other apps from your current voice channel",
                 "`/bambam` — Disconnect everyone from your current voice channel",
+                "`/perms` — Show required permissions for bot commands",
                 "`/kufur` — Rastgele bir Türkçe küfür söyler",
                 "`/help` — Show this message",
               ].join("\n"),
