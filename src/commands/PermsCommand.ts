@@ -40,6 +40,10 @@ export class PermsCommand implements SlashCommand {
     const voiceContext = voiceChannel
       ? `Checking voice channel: **${voiceChannel.name}**`
       : "Join a voice channel to check voice-command permissions here.";
+    const cleanChannelStatus =
+      interaction.channel && "bulkDelete" in interaction.channel
+        ? "✅ Current channel supports message cleanup"
+        : "❌ Current channel does not support message cleanup";
 
     const embed = new EmbedBuilder()
       .setColor(EMBED_COLOR)
@@ -65,6 +69,25 @@ export class PermsCommand implements SlashCommand {
               textPermissions,
               Flags.ManageMessages,
               "Manage Messages for /clean",
+            ),
+          ].join("\n"),
+        },
+        {
+          name: "🧹 /clean",
+          value: [
+            cleanChannelStatus,
+            "Caller: no Discord permission is currently enforced by the bot.",
+            "Bot:",
+            permissionLine(textPermissions, Flags.ViewChannel, "View Channel"),
+            permissionLine(
+              textPermissions,
+              Flags.ReadMessageHistory,
+              "Read Message History",
+            ),
+            permissionLine(
+              textPermissions,
+              Flags.ManageMessages,
+              "Manage Messages",
             ),
           ].join("\n"),
         },
