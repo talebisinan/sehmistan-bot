@@ -1,90 +1,82 @@
-import {
-  ActivityType,
-  Client,
-  GatewayIntentBits,
-  REST,
-  Routes,
-} from "discord.js";
 import { config } from "./config";
-import {
-  commands,
-  handleCommand,
-  handleModalSubmit,
-  handleSelectMenu,
-  handleUserSelectMenu,
-} from "./commands/CommandHandler";
+import { Bot } from "./bot/Bot";
+import { CommandRegistry } from "./bot/CommandRegistry";
+import { InteractionRouter } from "./bot/InteractionRouter";
+import type { SlashCommand } from "./core/SlashCommand";
+
+// Services (dependencies)
+import { MusicServiceRegistry } from "./services/MusicServiceRegistry";
+import { YtdlpService } from "./services/YtdlpService";
+import { VoiceGuard } from "./services/VoiceGuard";
+import { WalkService } from "./services/WalkService";
+import { DisconnectService } from "./services/DisconnectService";
+
+// Commands
+import { PlayCommand } from "./commands/PlayCommand";
+import { PlaylistSearchCommand } from "./commands/PlaylistSearchCommand";
+import { SkipCommand } from "./commands/SkipCommand";
+import { StopCommand } from "./commands/StopCommand";
+import { SeekCommand } from "./commands/SeekCommand";
+import { QueueCommand } from "./commands/QueueCommand";
+import { RadioCommand } from "./commands/RadioCommand";
+import { KufurCommand } from "./commands/KufurCommand";
+import { CleanCommand } from "./commands/CleanCommand";
+import { BamCommand } from "./commands/BamCommand";
+import { BamBamCommand } from "./commands/BamBamCommand";
+import { TakeWalkCommand } from "./commands/TakeWalkCommand";
+import { LotteryCommand } from "./commands/LotteryCommand";
+import { PermsCommand } from "./commands/PermsCommand";
+import { HelpCommand } from "./commands/HelpCommand";
+
+// Interaction handlers
+import { MusicSearchSelectHandler } from "./interactions/MusicSearchSelectHandler";
+import { QueueJumpSelectHandler } from "./interactions/QueueJumpSelectHandler";
+import { TakeWalkUserSelectHandler } from "./interactions/TakeWalkUserSelectHandler";
+import { TakeWalkModalHandler } from "./interactions/TakeWalkModalHandler";
 
 process.on("warning", (warning) => {
   if (warning.name === "TimeoutNegativeWarning") return;
   console.warn(warning);
 });
 
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildVoiceStates,
-    GatewayIntentBits.GuildMessages,
+// ── Composition root ────────────────────────────────────────────────────────
+// Everything is wired here by hand: no DI container, no module-level singletons.
+// Dependencies flow inward via constructors.
+
+const ytdlpService = new YtdlpService();
+const musicRegistry = new MusicServiceRegistry(ytdlpService);
+const voiceGuard = new VoiceGuard();
+const walkService = new WalkService();
+const disconnectService = new DisconnectService();
+
+const commands: SlashCommand[] = [
+  new PlayCommand(voiceGuard),
+  new PlaylistSearchCommand(voiceGuard),
+  new SkipCommand(voiceGuard),
+  new StopCommand(voiceGuard),
+  new SeekCommand(voiceGuard),
+  new QueueCommand(),
+  new RadioCommand(voiceGuard),
+  new KufurCommand(),
+  new CleanCommand(),
+  new BamCommand(voiceGuard, disconnectService),
+  new BamBamCommand(voiceGuard, disconnectService),
+  new TakeWalkCommand(voiceGuard, walkService),
+  new LotteryCommand(),
+  new PermsCommand(walkService),
+  new HelpCommand(),
+];
+
+const commandRegistry = new CommandRegistry(commands, voiceGuard, musicRegistry);
+
+const interactionRouter = new InteractionRouter({
+  stringSelect: [
+    new MusicSearchSelectHandler(musicRegistry, voiceGuard),
+    new QueueJumpSelectHandler(musicRegistry),
   ],
+  userSelect: [new TakeWalkUserSelectHandler(walkService)],
+  modal: [new TakeWalkModalHandler(musicRegistry, walkService)],
 });
 
-client.once("clientReady", () => {
-  console.log(`✅ Logged in as ${client.user?.tag}`);
-
-  client.user?.setPresence({
-    activities: [
-      {
-        name: "/help",
-        type: ActivityType.Listening,
-      },
-    ],
-    status: "online",
-  });
-
-  for (const guild of client.guilds.cache.values()) {
-    console.log(`📍 Connected to guild: ${guild.name} (${guild.id})`);
-  }
-});
-
-client.on("interactionCreate", async (interaction) => {
-  if (interaction.isChatInputCommand()) {
-    await handleCommand(interaction);
-  } else if (interaction.isStringSelectMenu()) {
-    await handleSelectMenu(interaction);
-  } else if (interaction.isUserSelectMenu()) {
-    await handleUserSelectMenu(interaction);
-  } else if (interaction.isModalSubmit()) {
-    await handleModalSubmit(interaction);
-  }
-});
-
-async function registerCommands() {
-  const rest = new REST().setToken(config.token);
-
-  try {
-    console.log("🔄 Registering slash commands...");
-
-    if (config.guildIds.length === 0) {
-      throw new Error(
-        "Set GUILD_IDS in your .env, e.g. GUILD_IDS=server_id_1,server_id_2",
-      );
-    }
-
-    const body = commands.map((cmd) => cmd.toJSON());
-
-    for (const guildId of config.guildIds) {
-      await rest.put(
-        Routes.applicationGuildCommands(config.clientId, guildId),
-        { body },
-      );
-
-      console.log(`✅ Slash commands registered for guild ${guildId}`);
-    }
-
-    console.log("✅ Slash command registration complete!");
-  } catch (error) {
-    console.error("❌ Failed to register commands:", error);
-  }
-}
-
-await registerCommands();
-client.login(config.token);
+const bot = new Bot(config, commandRegistry, interactionRouter);
+await bot.start();

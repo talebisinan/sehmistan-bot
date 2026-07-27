@@ -11,8 +11,8 @@ import {
   entersState,
 } from "@discordjs/voice";
 import type { VoiceBasedChannel } from "discord.js";
-import { search, video_info, playlist_info } from "play-dl";
 import { spawn, ChildProcess } from "child_process";
+import { YtdlpService, type YtdlpTrack } from "./YtdlpService";
 import { createReadStream, unlink } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -48,28 +48,9 @@ type PrefetchEntry = {
 const INITIAL_BUFFER_BYTES = 192_000 * 2;
 const PREFILL_TIMEOUT_MS = 8_000;
 const MAX_PLAY_ATTEMPTS = 2;
-const YTDLP_SEARCH_TIMEOUT_MS = 30_000;
 
-type ResolvedTrack = {
-  url: string;
-  title: string;
+type ResolvedTrack = YtdlpTrack & {
   duration?: string;
-  durationSec?: number;
-};
-
-type YtdlpSearchEntry = {
-  id?: unknown;
-  url?: unknown;
-  title?: unknown;
-  duration?: unknown;
-};
-
-type YtdlpSearchResponse = {
-  entries?: unknown;
-  id?: unknown;
-  url?: unknown;
-  title?: unknown;
-  duration?: unknown;
 };
 
 export function formatDuration(seconds: number): string {
@@ -148,11 +129,12 @@ export class MusicService {
   private ytdlpProcess: ChildProcess | null = null;
   private ffmpegProcess: ChildProcess | null = null;
   private currentFileStream: ReturnType<typeof createReadStream> | null = null;
-  private hasLoggedYtdlpAuthConfig = false;
   /** Keyed by video URL; supports pre-fetching the next 2 songs simultaneously. */
   private prefetchCache = new Map<string, PrefetchEntry>();
   /** Tracks per-URL play attempt counts for the retry logic. */
   private playAttempts = new Map<string, number>();
+
+  constructor(private readonly ytdlp: YtdlpService) {}
 
   async play(
     channel: VoiceBasedChannel,
@@ -202,7 +184,7 @@ export class MusicService {
         "Could not extract a YouTube video ID to seed the radio.",
       );
 
-    const tracks = await this.fetchRadioTracks(videoId, 25);
+    const tracks = await this.ytdlp.fetchRadioTracks(videoId, 25);
 
     // Filter out the seed song if it is already playing.
     const currentUrl = this.getCurrentSong()?.url;
@@ -257,118 +239,55 @@ export class MusicService {
     return null;
   }
 
-  private fetchRadioTracks(
-    videoId: string,
-    limit = 25,
-  ): Promise<Array<{ url: string; title: string; durationSec: number }>> {
-    return new Promise((resolve, reject) => {
-      const radioUrl = `https://www.youtube.com/watch?v=${videoId}&list=RD${videoId}`;
-      const args = [
-        "--flat-playlist",
-        "--dump-json",
-        "--no-warnings",
-        "--playlist-end",
-        String(limit),
-        radioUrl,
-      ];
-      const proc = spawn("yt-dlp", args, { stdio: ["ignore", "pipe", "pipe"] });
 
-      let raw = "";
-      proc.stdout!.on("data", (chunk: Buffer) => {
-        raw += chunk.toString();
-      });
-      proc.stderr!.on("data", (chunk: Buffer) => {
-        const msg = chunk.toString();
-        if (msg.trim()) console.warn("⚠️ yt-dlp radio:", msg.trim());
-      });
-
-      proc.on("error", reject);
-      proc.on("close", (code) => {
-        const tracks = raw
-          .split("\n")
-          .filter((l) => l.trim().startsWith("{"))
-          .map((l) => {
-            try {
-              const obj = JSON.parse(l) as {
-                id?: string;
-                title?: string;
-                duration?: number;
-              };
-              if (!obj.id || !obj.title) return null;
-              return {
-                url: `https://www.youtube.com/watch?v=${obj.id}`,
-                title: obj.title,
-                durationSec: obj.duration ?? 0,
-              };
-            } catch {
-              return null;
-            }
-          })
-          .filter(
-            (t): t is { url: string; title: string; durationSec: number } =>
-              t !== null,
-          );
-
-        if (code !== 0 && tracks.length === 0) {
-          reject(
-            new Error(`yt-dlp exited with code ${code} and returned no tracks`),
-          );
-        } else {
-          resolve(tracks);
-        }
-      });
-    });
-  }
 
   private async playPlaylist(
     channel: VoiceBasedChannel,
     url: string,
     requestedBy: string,
   ): Promise<{ title: string; duration?: string; queued: number }> {
-    const playlist = await playlist_info(url, { incomplete: true });
-    const allVideos = await playlist.all_videos();
-    const videos = allVideos.slice(0, 100);
+    const tracks = await this.ytdlp.fetchPlaylist(url, 100);
 
-    if (videos.length === 0)
+    if (tracks.length === 0)
       throw new Error("Playlist is empty or unavailable");
 
-    for (const v of videos) {
-      if (!v.url || !v.title) continue;
+    for (const track of tracks) {
       this.queue.push(
-        this.createQueueItem(v.url, v.title, v.durationInSec, requestedBy),
+        this.createQueueItem(
+          track.url,
+          track.title,
+          track.durationSec,
+          requestedBy,
+        ),
       );
     }
 
     await this.ensurePlayback(channel);
 
+    const firstTrack = tracks[0]!;
     const first = this.createQueueItem(
-      videos[0]!.url,
-      videos[0]!.title ?? "Unknown",
-      videos[0]!.durationInSec,
+      firstTrack.url,
+      firstTrack.title,
+      firstTrack.durationSec,
       requestedBy,
     );
     return {
       title: first.title,
       duration: first.duration,
-      queued: videos.length,
+      queued: tracks.length,
     };
   }
 
   async searchTracks(query: string): Promise<SearchResult[]> {
-    const results = await search(query, {
-      limit: 5,
-      source: { youtube: "video" },
-    });
-    return results
-      .filter((v) => v.url && v.title)
-      .map((v) => ({
-        url: v.url,
-        title: v.title ?? "Unknown",
-        duration:
-          v.durationInSec > 0 ? formatDuration(v.durationInSec) : undefined,
-        durationSec: v.durationInSec,
-        channelName: v.channel?.name,
-      }));
+    const results = await this.ytdlp.searchTracks(query, 5);
+    return results.map((track) => ({
+      url: track.url,
+      title: track.title,
+      duration:
+        track.durationSec > 0 ? formatDuration(track.durationSec) : undefined,
+      durationSec: track.durationSec,
+      channelName: track.channelName,
+    }));
   }
 
   seek(seconds: number): boolean {
@@ -546,146 +465,8 @@ export class MusicService {
     return args;
   }
 
-  private addYtdlpSharedArgs(args: string[]): void {
-    const youtubePlayerClient =
-      process.env.YTDLP_YOUTUBE_PLAYER_CLIENT?.trim() || "android,tv_embedded";
-    args.push(
-      "--extractor-args",
-      `youtube:player_client=${youtubePlayerClient}`,
-    );
-
-    const jsRuntimes = process.env.YTDLP_JS_RUNTIMES?.trim();
-    if (jsRuntimes) args.push("--js-runtimes", jsRuntimes);
-
-    const cookiesFile = process.env.YTDLP_COOKIES_FILE?.trim();
-    const cookiesBrowser = process.env.YTDLP_COOKIES_BROWSER?.trim();
-    if (cookiesFile) {
-      args.push("--cookies", cookiesFile);
-      if (!this.hasLoggedYtdlpAuthConfig) {
-        console.log(`🍪 yt-dlp cookies file: ${cookiesFile}`);
-        this.hasLoggedYtdlpAuthConfig = true;
-      }
-    } else if (cookiesBrowser) {
-      args.push("--cookies-from-browser", cookiesBrowser);
-      if (!this.hasLoggedYtdlpAuthConfig) {
-        console.log(`🍪 yt-dlp cookies-from-browser: ${cookiesBrowser}`);
-        this.hasLoggedYtdlpAuthConfig = true;
-      }
-    }
-  }
-
   private buildYtdlpArgs(url: string): string[] {
-    const args = ["-f", "bestaudio/best", "-o", "-", "--no-playlist"];
-    this.addYtdlpSharedArgs(args);
-    args.push(url);
-    return args;
-  }
-
-  private buildYtdlpSearchArgs(query: string): string[] {
-    const args = [
-      "--dump-single-json",
-      "--flat-playlist",
-      "--skip-download",
-      "--no-playlist",
-      "--default-search",
-      "ytsearch1",
-    ];
-    this.addYtdlpSharedArgs(args);
-    args.push(query);
-    return args;
-  }
-
-  private searchTrackWithYtdlp(query: string): Promise<ResolvedTrack> {
-    return new Promise((resolve, reject) => {
-      const proc = spawn("yt-dlp", this.buildYtdlpSearchArgs(query), {
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      let stdout = "";
-      let stderr = "";
-      let settled = false;
-
-      const timer = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        proc.kill("SIGKILL");
-        reject(new Error("yt-dlp search timed out"));
-      }, YTDLP_SEARCH_TIMEOUT_MS);
-
-      proc.stdout?.on("data", (chunk) => {
-        stdout += chunk.toString();
-      });
-      proc.stderr?.on("data", (chunk) => {
-        stderr += chunk.toString();
-      });
-
-      proc.on("error", (error) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        reject(error);
-      });
-
-      proc.on("close", (code) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-
-        if (code !== 0) {
-          reject(
-            new Error(
-              `yt-dlp search failed (${code}): ${stderr.trim() || "no stderr"}`,
-            ),
-          );
-          return;
-        }
-
-        try {
-          resolve(this.parseYtdlpSearchResult(stdout));
-        } catch (error) {
-          reject(error);
-        }
-      });
-    });
-  }
-
-  private parseYtdlpSearchResult(stdout: string): ResolvedTrack {
-    const parsed = JSON.parse(stdout) as YtdlpSearchResponse;
-    const entries = Array.isArray(parsed.entries) ? parsed.entries : [];
-    const entry = (entries[0] ?? parsed) as YtdlpSearchEntry;
-
-    const rawId = typeof entry.id === "string" ? entry.id : undefined;
-    const rawUrl = typeof entry.url === "string" ? entry.url : undefined;
-    const url = this.normalizeYtdlpVideoUrl(rawUrl, rawId);
-    if (!url) throw new Error("yt-dlp search returned no usable video URL");
-
-    const durationSec =
-      typeof entry.duration === "number" && Number.isFinite(entry.duration)
-        ? Math.max(0, Math.floor(entry.duration))
-        : 0;
-    const duration = durationSec > 0 ? formatDuration(durationSec) : undefined;
-
-    return {
-      url,
-      title: typeof entry.title === "string" ? entry.title : "Unknown",
-      duration,
-      durationSec,
-    };
-  }
-
-  private normalizeYtdlpVideoUrl(
-    rawUrl: string | undefined,
-    rawId: string | undefined,
-  ): string | null {
-    if (rawUrl?.startsWith("http://") || rawUrl?.startsWith("https://")) {
-      return rawUrl;
-    }
-
-    if (rawUrl?.startsWith("/watch")) {
-      return `https://www.youtube.com${rawUrl}`;
-    }
-
-    const id = rawId ?? rawUrl;
-    return id ? `https://www.youtube.com/watch?v=${id}` : null;
+    return this.ytdlp.buildStreamArgs(url);
   }
 
   private startPrefetch(item: QueueItem): void {
@@ -965,55 +746,20 @@ export class MusicService {
   }
 
   private async resolveTrack(searchOrUrl: string): Promise<ResolvedTrack> {
-    if (
-      searchOrUrl.includes("youtube.com") ||
-      searchOrUrl.includes("youtu.be")
-    ) {
+    const isUrl =
+      searchOrUrl.includes("youtube.com") || searchOrUrl.includes("youtu.be");
+
+    if (isUrl) {
       console.log("🔗 YouTube URL detected");
-      try {
-        const info = await video_info(searchOrUrl);
-        const title = info.video_details.title ?? "YouTube Video";
-        const durationSec = info.video_details.durationInSec;
-        const duration =
-          durationSec > 0 ? formatDuration(durationSec) : undefined;
-        console.log(`✅ Found: ${title}`);
-        return { url: searchOrUrl, title, duration, durationSec };
-      } catch (error) {
-        console.error("⚠️ Failed to fetch video info:", error);
-        return { url: searchOrUrl, title: "YouTube Video" };
-      }
+    } else {
+      console.log(`🔍 Searching for: ${searchOrUrl}`);
     }
 
-    console.log(`🔍 Searching for: ${searchOrUrl}`);
-    try {
-      const searchResults = await search(searchOrUrl, {
-        limit: 1,
-        source: { youtube: "video" },
-      });
-
-      const video = searchResults[0];
-      if (video?.url) {
-        console.log(`✅ Found: ${video.title}`);
-        const durationSec = video.durationInSec;
-        const duration =
-          durationSec > 0 ? formatDuration(durationSec) : undefined;
-
-        return {
-          url: video.url,
-          title: video.title ?? "Unknown",
-          duration,
-          durationSec,
-        };
-      }
-
-      console.warn("⚠️ play-dl search returned no usable results; falling back to yt-dlp");
-    } catch (error) {
-      console.warn("⚠️ play-dl search failed; falling back to yt-dlp:", error);
-    }
-
-    const track = await this.searchTrackWithYtdlp(searchOrUrl);
+    const track = await this.ytdlp.resolveTrack(searchOrUrl);
+    const duration =
+      track.durationSec > 0 ? formatDuration(track.durationSec) : undefined;
     console.log(`✅ Found via yt-dlp: ${track.title}`);
-    return track;
+    return { ...track, duration };
   }
 
   getCurrentSong(): QueueItem | null {
