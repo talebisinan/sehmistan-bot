@@ -6,6 +6,8 @@ import type { SlashCommand } from "./core/SlashCommand";
 
 // Services (dependencies)
 import { MusicServiceRegistry } from "./services/MusicServiceRegistry";
+import { PlayableTrackResolver } from "./services/PlayableTrackResolver";
+import { YouTubeSourceStrategy } from "./services/sources/YouTubeSourceStrategy";
 import { YtdlpService } from "./services/YtdlpService";
 import { VoiceGuard } from "./services/VoiceGuard";
 import { WalkService } from "./services/WalkService";
@@ -44,7 +46,10 @@ process.on("warning", (warning) => {
 // Dependencies flow inward via constructors.
 
 const ytdlpService = new YtdlpService();
-const musicRegistry = new MusicServiceRegistry(ytdlpService);
+const playableResolver = new PlayableTrackResolver([
+  new YouTubeSourceStrategy(ytdlpService),
+]);
+const musicRegistry = new MusicServiceRegistry(playableResolver, ytdlpService);
 const voiceGuard = new VoiceGuard();
 const walkService = new WalkService();
 const disconnectService = new DisconnectService();

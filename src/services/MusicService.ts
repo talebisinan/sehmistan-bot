@@ -12,7 +12,12 @@ import {
 } from "@discordjs/voice";
 import type { VoiceBasedChannel } from "discord.js";
 import { spawn, ChildProcess } from "child_process";
-import { YtdlpService, type YtdlpTrack } from "./YtdlpService";
+import {
+  PlayableTrackResolver,
+  type PlayableCollection,
+  type PlayableTrack,
+} from "./PlayableTrackResolver";
+import { YtdlpService } from "./YtdlpService";
 import { createReadStream, unlink } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -49,7 +54,7 @@ const INITIAL_BUFFER_BYTES = 192_000 * 2;
 const PREFILL_TIMEOUT_MS = 8_000;
 const MAX_PLAY_ATTEMPTS = 2;
 
-type ResolvedTrack = YtdlpTrack & {
+type ResolvedTrack = PlayableTrack & {
   duration?: string;
 };
 
@@ -134,15 +139,19 @@ export class MusicService {
   /** Tracks per-URL play attempt counts for the retry logic. */
   private playAttempts = new Map<string, number>();
 
-  constructor(private readonly ytdlp: YtdlpService) {}
+  constructor(
+    private readonly resolver: PlayableTrackResolver,
+    private readonly ytdlp: YtdlpService,
+  ) {}
 
   async play(
     channel: VoiceBasedChannel,
     urlOrQuery: string,
     requestedBy: string = "Unknown",
   ): Promise<{ title: string; duration?: string; queued: number }> {
-    if (this.isPlaylistUrl(urlOrQuery)) {
-      return this.playPlaylist(channel, urlOrQuery, requestedBy);
+    const collection = await this.resolver.resolveCollection(urlOrQuery);
+    if (collection) {
+      return this.playCollection(channel, collection, requestedBy);
     }
 
     const { url, title, durationSec = 0 } = await this.resolveTrack(urlOrQuery);
@@ -214,18 +223,7 @@ export class MusicService {
       })),
     };
   }
-  private isPlaylistUrl(url: string): boolean {
-    try {
-      const parsed = new URL(url);
-      return (
-        parsed.hostname.includes("youtube.com") &&
-        parsed.pathname === "/playlist" &&
-        !!parsed.searchParams.get("list")
-      );
-    } catch {
-      return false;
-    }
-  }
+
 
   private extractVideoId(url: string): string | null {
     try {
@@ -241,17 +239,15 @@ export class MusicService {
 
 
 
-  private async playPlaylist(
+  private async playCollection(
     channel: VoiceBasedChannel,
-    url: string,
+    collection: PlayableCollection,
     requestedBy: string,
   ): Promise<{ title: string; duration?: string; queued: number }> {
-    const tracks = await this.ytdlp.fetchPlaylist(url, 100);
-
-    if (tracks.length === 0)
+    if (collection.tracks.length === 0)
       throw new Error("Playlist is empty or unavailable");
 
-    for (const track of tracks) {
+    for (const track of collection.tracks) {
       this.queue.push(
         this.createQueueItem(
           track.url,
@@ -264,7 +260,7 @@ export class MusicService {
 
     await this.ensurePlayback(channel);
 
-    const firstTrack = tracks[0]!;
+    const firstTrack = collection.tracks[0]!;
     const first = this.createQueueItem(
       firstTrack.url,
       firstTrack.title,
@@ -274,7 +270,7 @@ export class MusicService {
     return {
       title: first.title,
       duration: first.duration,
-      queued: tracks.length,
+      queued: collection.tracks.length,
     };
   }
 
@@ -755,7 +751,7 @@ export class MusicService {
       console.log(`🔍 Searching for: ${searchOrUrl}`);
     }
 
-    const track = await this.ytdlp.resolveTrack(searchOrUrl);
+    const track = await this.resolver.resolveTrack(searchOrUrl);
     const duration =
       track.durationSec > 0 ? formatDuration(track.durationSec) : undefined;
     console.log(`✅ Found via yt-dlp: ${track.title}`);

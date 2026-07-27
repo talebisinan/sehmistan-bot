@@ -1,4 +1,5 @@
 import { MusicService } from "./MusicService";
+import type { PlayableTrackResolver } from "./PlayableTrackResolver";
 import type { YtdlpService } from "./YtdlpService";
 
 /**
@@ -9,12 +10,15 @@ import type { YtdlpService } from "./YtdlpService";
 export class MusicServiceRegistry {
   private readonly services = new Map<string, MusicService>();
 
-  constructor(private readonly ytdlp: YtdlpService) {}
+  constructor(
+    private readonly resolver: PlayableTrackResolver,
+    private readonly ytdlp: YtdlpService,
+  ) {}
 
   forGuild(guildId: string): MusicService {
     let service = this.services.get(guildId);
     if (!service) {
-      service = new MusicService(this.ytdlp);
+      service = new MusicService(this.resolver, this.ytdlp);
       this.services.set(guildId, service);
     }
     return service;
