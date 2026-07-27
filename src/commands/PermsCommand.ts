@@ -40,6 +40,11 @@ export class PermsCommand implements SlashCommand {
     const voiceContext = voiceChannel
       ? `Checking voice channel: **${voiceChannel.name}**`
       : "Join a voice channel to check voice-command permissions here.";
+    const canSendHere =
+      interaction.channel?.isTextBased() && "send" in interaction.channel;
+    const sendChannelStatus = canSendHere
+      ? "✅ Current channel supports sending messages"
+      : "❌ Current channel does not support sending messages";
     const cleanChannelStatus =
       interaction.channel && "bulkDelete" in interaction.channel
         ? "✅ Current channel supports message cleanup"
@@ -70,6 +75,22 @@ export class PermsCommand implements SlashCommand {
               Flags.ManageMessages,
               "Manage Messages for /clean",
             ),
+          ].join("\n"),
+        },
+        {
+          name: "💬 /say",
+          value: [
+            sendChannelStatus,
+            "Bot:",
+            permissionLine(textPermissions, Flags.ViewChannel, "View Channel"),
+            permissionLine(textPermissions, Flags.SendMessages, "Send Messages"),
+            interaction.channel?.isThread()
+              ? permissionLine(
+                  textPermissions,
+                  Flags.SendMessagesInThreads,
+                  "Send Messages in Threads",
+                )
+              : "➖ Send Messages in Threads not needed here",
           ].join("\n"),
         },
         {

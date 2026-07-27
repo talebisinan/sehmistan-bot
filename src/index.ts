@@ -23,6 +23,7 @@ import { QueueCommand } from "./commands/QueueCommand";
 import { RadioCommand } from "./commands/RadioCommand";
 import { KufurCommand } from "./commands/KufurCommand";
 import { CleanCommand } from "./commands/CleanCommand";
+import { SayCommand } from "./commands/SayCommand";
 import { BamCommand } from "./commands/BamCommand";
 import { BamBamCommand } from "./commands/BamBamCommand";
 import { TakeWalkCommand } from "./commands/TakeWalkCommand";
@@ -64,6 +65,7 @@ const commands: SlashCommand[] = [
   new RadioCommand(voiceGuard),
   new KufurCommand(),
   new CleanCommand(),
+  new SayCommand(),
   new BamCommand(voiceGuard, disconnectService),
   new BamBamCommand(voiceGuard, disconnectService),
   new TakeWalkCommand(voiceGuard, walkService),

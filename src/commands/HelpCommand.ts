@@ -35,6 +35,7 @@ export class HelpCommand implements SlashCommand {
           name: "🧹 Utility",
           value: [
             "`/clean [amount]` — Bulk-delete recent messages (default 10, max 100)",
+            "`/say <text> [times]` — Make the bot say text once per second (max 30)",
             "`/bam` — Disconnect other apps from your current voice channel",
             "`/bambam` — Disconnect everyone from your current voice channel",
             "`/takewalk <user>` — Take someone in your voice channel on a 5-stop tour",

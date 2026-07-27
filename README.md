@@ -8,7 +8,7 @@ A Discord music and voice utility bot powered by `discord.js`, `yt-dlp`, `ffmpeg
 - Search YouTube with a dropdown picker
 - Queue, skip, stop, seek, and radio-style queue expansion
 - Voice moderation helpers: `/bam`, `/bambam`, `/takewalk`, `/lottery`
-- Utility commands: `/help`, `/perms`, `/clean`, `/kufur`
+- Utility commands: `/help`, `/perms`, `/clean`, `/say`, `/kufur`
 
 ## Requirements
 
@@ -86,6 +86,7 @@ bun run dev
 | `/lottery` | Pick a random non-bot user from your voice channel |
 | `/perms` | Show required permissions and current permission status |
 | `/clean` | Bulk-delete recent bot messages |
+| `/say <text> [times]` | Make the bot say text once per second in the current channel |
 | `/help` | Show command help |
 | `/kufur` | Send a random Turkish swear word |
 
